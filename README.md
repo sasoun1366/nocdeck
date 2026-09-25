@@ -78,6 +78,20 @@ pip install nocdeck                 # the command line and the web dashboard
 pip install "nocdeck[desktop]"      # and the window (PyQt6)
 ```
 
+Or take a binary from the [releases page](https://github.com/sasoun1366/nocdeck/releases)
+and skip Python entirely:
+
+| download | what it is |
+| --- | --- |
+| `nocdeck-<version>-windows-cli.exe` | the command line and the web dashboard for Windows |
+| `nocdeck-<version>-windows-desktop.exe` | the desktop window for Windows, no console |
+| `nocdeck-<version>-linux-x86_64` | the command line and the web dashboard for Linux |
+| `nocdeck-<version>-linux-x86_64-desktop` | the desktop window for Linux |
+
+The Windows executables are built and smoke-tested on every tag: the release job
+launches the windowed one exactly the way a person double-clicking it would, with no
+console attached, and refuses to publish a build that does not draw a window.
+
 On the dashboard side of the house that is all there is — Python 3.9+ and nothing else.
 For the desktop window, Linux also wants the usual Qt system libraries
 (`libxkbcommon0`, `libegl1`, `libgl1`, `libxcb-cursor0`).

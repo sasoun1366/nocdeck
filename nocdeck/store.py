@@ -338,11 +338,14 @@ class Store:
                                   AVG(latency_ms) AS latency
                            FROM samples WHERE ts>=?""", (since,))
         devices = self._one("SELECT COUNT(*) AS n, SUM(enabled) AS switched_on FROM devices")
+        # `SUM(...)` over an empty table is NULL, not zero — a fleet with no readings
+        # yet must still be four integers, because everything downstream formats them.
         return {"devices": devices["n"] if devices else 0,
                 "enabled": (devices["switched_on"] if devices else 0) or 0,
-                "samples": row["total"] if row else 0,
-                "up": row["up"] if row else 0, "degraded": row["degraded"] if row else 0,
-                "down": row["down"] if row else 0,
+                "samples": (row["total"] if row else 0) or 0,
+                "up": (row["up"] if row else 0) or 0,
+                "degraded": (row["degraded"] if row else 0) or 0,
+                "down": (row["down"] if row else 0) or 0,
                 "latency": round(row["latency"], 1) if row and row["latency"] else None,
                 "since": datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="seconds")}
 

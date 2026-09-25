@@ -16,8 +16,10 @@ Run it:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -994,7 +996,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([280, 1000])
 
         self.repaint_timer = QTimer(self)
-        self.repaint_timer.timeout.connect(lambda: self.reload())
+        self.repaint_timer.timeout.connect(self.refresh)
         self.repaint_timer.start(max(2, int(config.refresh_seconds)) * 1000)
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self._tick)
@@ -1007,21 +1009,40 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(400, lambda: self.poll_now())
 
     # ------------------------------------------------------------------ plumbing
+    def refresh(self) -> None:
+        """Reload from a timer, and never let a bad cycle end the window."""
+        try:
+            self.reload()
+        except Exception as exc:                          # noqa: BLE001
+            import traceback
+
+            traceback.print_exc()
+            self.status.showMessage("refresh failed: %s" % exc, 10000)
+
     def apply_settings(self) -> None:
         self.repaint_timer.start(max(2, int(self.config.refresh_seconds)) * 1000)
 
     def _tick(self) -> None:
-        """Once a second: the clock in the status bar, and nothing more."""
+        """Once a second: the clock in the status bar, and nothing more.
+
+        A timer callback is the worst place for an exception: PyQt6 turns an unhandled
+        one into `qFatal`, so a bad number would take the window with it. The status bar
+        is the least important thing on screen, which is exactly why it is not allowed
+        to be the last thing on it.
+        """
         if self.worker is not None and self.worker.isRunning():
             self.status.showMessage("polling…")
             return
-        fleet = self.store.fleet(hours=24)
-        stamp = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        self.status.showMessage("%s · %d device(s) · %d up / %d degraded / %d down · "
-                                "%d reading(s) 24 h · db %s"
-                                % (stamp, fleet["devices"], fleet["up"], fleet["degraded"],
-                                   fleet["down"], fleet["samples"],
-                                   human_bytes(self.store.size())))
+        try:
+            fleet = self.store.fleet(hours=24)
+            stamp = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            self.status.showMessage("%s · %d device(s) · %d up / %d degraded / %d down · "
+                                    "%d reading(s) 24 h · db %s"
+                                    % (stamp, fleet["devices"], fleet["up"],
+                                       fleet["degraded"], fleet["down"], fleet["samples"],
+                                       human_bytes(self.store.size())))
+        except Exception as exc:                          # noqa: BLE001
+            self.status.showMessage("the status bar could not read the database: %s" % exc)
 
     def _auto_toggled(self, checked: bool) -> None:
         if checked:
@@ -1225,10 +1246,14 @@ def build_window(store: Store, config: Config, poller: Optional[Poller] = None,
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
-    """Plain arguments in, a dictionary out — no Qt, no store, no side effects."""
+    """Plain arguments in, a dictionary out — no Qt, no store, no side effects.
+
+    `None` means "the command line I was started with", the same convention argparse
+    uses, so a frozen entry point and a subcommand can both call it without thinking.
+    """
     options: Dict[str, object] = {"shot": "", "tab": "", "demo": False, "db": "",
                                   "size": 0, "warmup": 6, "seed": 7}
-    argv = list(argv or [])
+    argv = list(sys.argv[1:] if argv is None else argv)
     index = 0
     while index < len(argv):
         argument = argv[index]
@@ -1287,15 +1312,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if demo:
         window.auto_action.setChecked(True)
 
+    def mark(text: str) -> None:
+        """Progress on file descriptor 2, not `sys.stderr`.
+
+        A frozen windowed build has no Python streams at all (`sys.stderr` is None), so
+        anything written through them disappears — which is how a crash-before-the-window
+        looks like a hang. Qt writes to the descriptor directly for the same reason.
+        """
+        try:
+            os.write(2, ("· %s\n" % text).encode("utf-8", "replace"))
+        except OSError:
+            pass
+
+    def watchdog(seconds: float) -> None:
+        """A screenshot is never worth hanging a build machine.
+
+        The window gets its own process, so a frozen copy that wedges — a missing Qt
+        platform plugin is the usual reason — would otherwise sit there until a CI
+        timeout hours later. This ends it early, loudly, with a code the workflow sees.
+        """
+
+        def bark() -> None:
+            time.sleep(seconds)
+            mark("shot: nothing after %.0f s — giving up" % seconds)
+            os._exit(4)
+
+        threading.Thread(target=bark, daemon=True, name="shot-watchdog").start()
+
     if shot:
+        watchdog(180.0)
         # Render without ever opening a real window: `WA_DontShowOnScreen` lays the
         # widgets out and paints them exactly as they would look, which is what a
         # screenshot wants, and it works on a build machine with no display server
         # (and, unlike `show()`, it can be done more than once in one process).
         window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         window.resize(1280, 820)
+        mark("shot: window built")
         window.show()
+        mark("shot: shown")
         window.reload()
+        mark("shot: reloaded")
         if tab:
             labels = [window.tabs.tabText(i).lower() for i in range(window.tabs.count())]
             window.tabs.setCurrentIndex(labels.index(tab.lower())
@@ -1304,11 +1360,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for _ in range(6):
             app.processEvents()
             time.sleep(0.05)
+        mark("shot: events pumped")
         path = pathlib.Path(shot)
         window.grab().save(str(path))
+        mark("shot: grabbed")
         print("wrote %s (%d bytes)" % (path, path.stat().st_size))
         window.close()
+        mark("shot: window closed")
         store.close()
+        mark("shot: store closed")
         return 0
 
     window.show()

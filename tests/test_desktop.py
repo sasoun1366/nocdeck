@@ -353,6 +353,17 @@ def test_the_renderer_writes_a_png_and_leaves_a_store_the_web_can_serve(home, tm
     store.close()
 
 
+def test_the_arguments_come_from_the_real_command_line_when_none_are_given(monkeypatch):
+    """`--demo --shot x.png` reached nothing when the frozen entry point called `main()`
+    with no arguments: the window opened blank and sat at an event loop. `None` means
+    "read sys.argv", exactly like argparse."""
+    monkeypatch.setattr("sys.argv", ["nocdeck-desktop", "--demo", "--shot", "f.png",
+                                     "--tab", "fleet"])
+    options = DESKTOP_IMPL.parse_args(None)
+    assert options["demo"] is True and options["shot"] == "f.png"
+    assert options["tab"] == "fleet"
+
+
 def test_the_arguments_are_read_without_starting_qt():
     options = DESKTOP_IMPL.parse_args(["--demo", "--shot", "f.png", "--tab", "events",
                                        "--size", "3", "--warmup", "2", "--seed", "11",

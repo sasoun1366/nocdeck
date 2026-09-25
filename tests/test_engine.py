@@ -520,3 +520,17 @@ def test_the_wait_is_bounded_so_the_loop_stays_responsive(store, config, switch)
     store.save_device(switch)
     poller = poller_with(store, config)
     assert 0 < poller.wait_seconds() <= 30
+
+
+def test_a_fleet_with_no_readings_yet_is_four_integers(store, config):
+    """A brand-new install has an empty samples table, and `SUM()` over nothing is NULL.
+    Everything downstream formats these with `%d`, so the store hands back zeroes."""
+    store.devices()
+    fleet = store.fleet(hours=24)
+    assert fleet["devices"] == 0 and fleet["samples"] == 0
+    for key in ("up", "degraded", "down"):
+        assert fleet[key] == 0 and isinstance(fleet[key], int), key
+    # …and the line the status bar prints needs no special case
+    assert "%d device(s) · %d up / %d degraded / %d down · %d reading(s)" % (
+        fleet["devices"], fleet["up"], fleet["degraded"], fleet["down"],
+        fleet["samples"])
