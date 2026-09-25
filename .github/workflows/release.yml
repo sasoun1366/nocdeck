@@ -1,0 +1,116 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[packaging,dev,desktop]"
+      - name: Run the test suite before shipping anything
+        # `QT_QPA_PLATFORM=offscreen` so the desktop tests run on a machine with no
+        # display; they are the tests that matter most here, because the frozen window is
+        # the artifact most likely to break in a way the CLI cannot show.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build the command line
+        run: pyinstaller packaging/nocdeck-cli.spec
+      - name: Build the desktop window
+        run: pyinstaller packaging/nocdeck-desktop.spec
+      - name: Rename the artifacts with the version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          cp dist/nocdeck.exe "out/nocdeck-${version}-windows-cli.exe"
+          cp dist/nocdeck-desktop.exe "out/nocdeck-${version}-windows-desktop.exe"
+      - name: Smoke-test the frozen command line
+        shell: bash
+        env:
+          NOCDECK_HOME: ${{ runner.temp }}\nocdeck-cli-smoke
+        run: |
+          ./out/nocdeck-*-windows-cli.exe version
+          ./out/nocdeck-*-windows-cli.exe list
+          ./out/nocdeck-*-windows-cli.exe summary
+      - name: Smoke-test the frozen window
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          NOCDECK_HOME: ${{ runner.temp }}\nocdeck-desktop-smoke
+        run: |
+          # `Start-Process` gives this windowed executable **no console** — exactly what a
+          # person double-clicking the download gets. Launching it from a shell is not the
+          # same test: a shell hands over its console and a build that dies before its
+          # window appears looks perfectly healthy. So: run it the way the user does, but
+          # with `--shot`, which draws one frame, writes a PNG and exits by itself.
+          $exe = Get-ChildItem out/nocdeck-*-windows-desktop.exe | Select-Object -First 1
+          $frame = Join-Path $env:RUNNER_TEMP 'frame.png'
+          Write-Host "launching $($exe.Name)"
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList '--demo','--shot',$frame,'--size','3','--warmup','2' -PassThru
+          if (-not $proc.WaitForExit(90000)) { Stop-Process -Id $proc.Id -Force }
+          if (-not (Test-Path $frame) -or (Get-Item $frame).Length -lt 10000) {
+            Write-Error 'the frozen window never drew a frame — nothing was released'
+          }
+          Write-Host "the frozen window drew a frame: $((Get-Item $frame).Length) bytes"
+      - name: Upload the executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-executables
+          path: out/*.exe
+
+  release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the Windows executables
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-executables
+          path: out
+      - name: Choose the release notes
+        # Written notes if the release has them (`docs/releases/v0.1.0.md`), otherwise
+        # whatever GitHub can generate from the commits. The REST API cannot update a
+        # release by tag — only by id — so the notes have to be right the first time.
+        shell: bash
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            echo "BODY_PATH=$notes" >> "$GITHUB_ENV"
+            echo "using $notes"
+          else
+            echo "no $notes — GitHub will generate the notes"
+          fi
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body_path: ${{ env.BODY_PATH }}
+          draft: false
+          prerelease: false
+          files: out/*.exe
+      - name: Announce on Telegram
+        # A release created by a workflow with GITHUB_TOKEN does not trigger other
+        # workflows (GitHub's anti-recursion rule), so the announcement cannot rely on
+        # the `release: published` event for automated releases. It runs right here.
+        # With no secrets set this prints a warning and changes nothing.
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_LANG: ${{ vars.TELEGRAM_LANG || 'both' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/telegram/announce.py

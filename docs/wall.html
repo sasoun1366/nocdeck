@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nocdeck — wall</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1017;--panel:#141d29;--panel2:#1a2534;--line:#22303f;
+      --text:#e8eef5;--dim:#8ba0b6;--up:#3ddc84;--warn:#ffb648;--down:#ff5f56;
+      --unknown:#7a8b9c;--accent:#4aa8ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+     font:15px/1.55 -apple-system,"Segoe UI",Roboto,"Noto Naskh Arabic",Tahoma,sans-serif}
+a{color:var(--accent);text-decoration:none}
+header{position:sticky;top:0;z-index:6;background:linear-gradient(#0e1621,#0e1621ee);
+       border-bottom:1px solid var(--line);padding:12px 18px;display:flex;gap:16px;
+       align-items:center;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+header .clock{color:var(--dim);font-size:13px;margin-inline-start:auto}
+.wrap{max-width:1500px;margin:0 auto;padding:18px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;
+       margin-bottom:16px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.tile b{display:block;font-size:26px;font-weight:650;line-height:1.15}
+.tile span{color:var(--dim);font-size:12.5px}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.filters a,.filters button{border:1px solid var(--line);background:var(--panel);color:var(--text);
+       border-radius:999px;padding:6px 13px;font-size:13px;cursor:pointer}
+.filters a.on{background:#1d3category;border-color:#2f5d86;background:#182a3d}
+input[type=search]{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+       color:var(--text);padding:7px 14px;font-size:13.5px;min-width:220px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--unknown);
+      border-radius:12px;padding:13px 15px;display:flex;flex-direction:column;gap:9px;
+      transition:border-color .15s,transform .15s}
+.card:hover{transform:translateY(-1px)}
+.card.up{border-left-color:var(--up)} .card.down{border-left-color:var(--down)}
+.card.degraded{border-left-color:var(--warn)} .card.unknown{border-left-color:var(--unknown)}
+.card .top{display:flex;align-items:baseline;gap:8px}
+.card .top b{font-size:15.5px}
+.card .host{color:var(--dim);font-size:12.5px}
+.card .pill{margin-inline-start:auto;font-size:11.5px;border-radius:999px;padding:2px 9px;
+      background:#1b2735;color:var(--dim)}
+.card .pill.up{background:#12331f;color:var(--up)} .card .pill.down{background:#3a1a1a;color:var(--down)}
+.card .pill.degraded{background:#3a2c12;color:var(--warn)}
+.kv{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:12.5px}
+.kv b{color:var(--text);font-weight:600}
+.spark{height:34px}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:11.5px;color:var(--dim);background:#16202c;border-radius:6px;padding:1px 7px}
+.table{width:100%;border-collapse:collapse;font-size:13.5px}
+.table th{text-align:left;color:var(--dim);font-weight:500;border-bottom:1px solid var(--line);
+          padding:7px 8px;position:sticky;top:0;background:var(--bg)}
+.table td{border-bottom:1px solid #16202b;padding:7px 8px}
+.table tr:hover td{background:#131c28}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+       padding:15px 17px;margin-bottom:16px}
+.panel h2{font-size:14px;margin:0 0 12px;color:var(--dim);font-weight:600;
+          text-transform:uppercase;letter-spacing:.08em}
+.bar{height:7px;background:#16202b;border-radius:999px;overflow:hidden;min-width:70px}
+.bar i{display:block;height:100%;background:var(--up)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.big{font-size:24px;font-weight:600}
+.dim{color:var(--dim)}
+.sev-critical{color:var(--down)} .sev-warning{color:var(--warn)} .sev-info{color:var(--up)}
+footer{color:var(--dim);font-size:12.5px;text-align:center;padding:26px 10px 40px}
+.wallgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.wallcard{border-radius:12px;padding:14px;background:var(--panel);border:1px solid var(--line)}
+.wallcard.up{background:#0f2a1c;border-color:#1d5236}
+.wallcard.down{background:#2c1414;border-color:#632424}
+.wallcard.degraded{background:#2b2210;border-color:#63501f}
+.wallcard b{display:block;font-size:16px}
+.wallcard .s{font-size:12.5px;color:var(--dim)}
+button.act{background:#182a3d;border:1px solid #2f5d86;color:var(--text);border-radius:8px;
+           padding:6px 12px;font-size:13px;cursor:pointer}
+</style></head><body>
+<header>
+  <h1>🛰 nocdeck</h1>
+  
+  <span class="clock" id="clock">19:58:00 UTC</span>
+</header>
+<div class="wrap">
+<div class="wallgrid"><div class="wallcard up"><b>acc-sw-floor1</b><div class="s">10.20.1.11</div><div class="s mono">CPU 15 · temp 39 · MEMORY 48</div><div class="s">2 ms</div></div><div class="wallcard up"><b>acc-sw-floor2</b><div class="s">10.20.1.12</div><div class="s mono">CPU 40 · temp 41 · MEMORY 41</div><div class="s">6 ms</div></div><div class="wallcard up"><b>ap-lobby</b><div class="s">10.20.2.21</div><div class="s mono">temp 44 · MEMORY 56</div><div class="s">2 ms</div></div><div class="wallcard up"><b>core-sw-01</b><div class="s">10.20.0.2</div><div class="s mono">CPU 19 · temp 41</div><div class="s">8 ms</div></div><div class="wallcard up"><b>core-sw-02</b><div class="s">10.20.0.3</div><div class="s mono">CPU 1 · temp 34</div><div class="s">7 ms</div></div><div class="wallcard up"><b>edge-router</b><div class="s">10.20.0.1</div><div class="s mono">CPU 11 · temp 39</div><div class="s">5 ms</div></div><div class="wallcard up"><b>fw-hq</b><div class="s">10.20.0.10</div><div class="s mono">CPU 54 · temp 52 · MEMORY 64</div><div class="s">9 ms</div></div><div class="wallcard up"><b>printer-2f</b><div class="s">10.20.5.51</div><div class="s mono">temp 24.8</div><div class="s">9 ms</div></div><div class="wallcard up"><b>srv-dc-01</b><div class="s">10.20.3.31</div><div class="s mono">CPU 60 · temp 46.4</div><div class="s">2 ms</div></div><div class="wallcard up"><b>srv-file-01</b><div class="s">10.20.3.32</div><div class="s mono">CPU 68 · temp 49.7</div><div class="s">9 ms</div></div><div class="wallcard up"><b>ups-rack-a</b><div class="s">10.20.4.41</div><div class="s mono">temp 20</div><div class="s">4 ms</div></div></div>
+</div>
+<footer>nocdeck · <a href="https://github.com/sasoun1366/nocdeck">github.com/sasoun1366/nocdeck</a>
+ · <a href="/events">events</a> · <a href="/wall">wall</a> · <a href="/api/summary">api</a></footer>
+<noscript><meta http-equiv="refresh" content="30"></noscript>
+<script>
+(function(){
+  var seconds = 30;
+  function swap(url, target){
+    fetch(url, {headers:{"Accept":"text/html"}})
+      .then(function(r){return r.text()})
+      .then(function(html){var node=document.querySelector(target); if(node){node.innerHTML=html;}})
+      .catch(function(){});
+  }
+  function tick(){
+    swap("/_cards" + location.search, "#cards");
+    swap("/_summary" + location.search, "#tiles");
+    swap("/_events" + location.search, "#events");
+    var now = new Date();
+    var el = document.getElementById("clock");
+    if(el){el.textContent = now.toISOString().substr(11,8) + " UTC";}
+  }
+  setInterval(tick, seconds*1000);
+  document.addEventListener("click", function(event){
+    var button = event.target.closest("[data-poll]");
+    if(!button){return}
+    button.disabled = true; button.textContent = "…";
+    fetch("/api/poll/" + button.getAttribute("data-poll"), {method:"POST"})
+      .then(function(){return fetch("/_cards" + location.search)})
+      .then(function(r){return r.text()})
+      .then(function(html){var node=document.querySelector("#cards"); if(node){node.innerHTML=html;}})
+      .catch(function(){})
+      .finally(function(){button.disabled=false; button.textContent="بازخوانی"};
+    );
+  });
+})();
+</script>
+</body></html>

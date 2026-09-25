@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nocdeck"
+version = "0.1.0"
+description = "A network monitoring dashboard for anything with an IP address — SNMP, ping, ports, history, alerts, no dependencies."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Sasoun Shaghoulian" }]
+keywords = ["snmp", "network", "monitoring", "dashboard", "noc", "telegram", "nocdeck"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The window. Optional on purpose: the command line and the web dashboard need nothing.
+desktop = ["PyQt6>=6.5"]
+dev = ["pytest>=7.0"]
+# Building the Windows executables (CI does this on a tag; see .github/workflows).
+packaging = ["pyinstaller>=6.0"]
+
+[project.scripts]
+nocdeck = "nocdeck.cli:main"
+nocdeck-desktop = "nocdeck.desktop:main"
+
+[project.urls]
+Homepage = "https://github.com/sasoun1366/nocdeck"
+Changelog = "https://github.com/sasoun1366/nocdeck/releases"
+Telegram = "https://t.me/luyavaai"
+
+[tool.setuptools]
+packages = ["nocdeck", "nocdeck.desktop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

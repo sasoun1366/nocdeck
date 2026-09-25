@@ -1,0 +1,55 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Install the Qt system libraries
+        # A bare runner has the Python side of Qt but none of the C libraries it links
+        # against, so the dashboard tests would skip themselves on every push. These are
+        # the ones an offscreen QApplication actually needs.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
+            libxcb-xinerama0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 || true
+      - name: Install the desktop extra (best effort)
+        # If the wheel will not install here, the dashboard tests skip themselves — a
+        # missing optional extra must not fail the build.
+        run: pip install "PyQt6>=6.6" || echo "PyQt6 unavailable — the dashboard tests will be skipped"
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+      - name: The tool runs on this Python
+        # Nothing here touches the network: `demo` answers from the simulator and
+        # `--shot` only draws a window. A red build means the code is wrong, not that a
+        # switch is unreachable.
+        env:
+          QT_QPA_PLATFORM: offscreen
+          NOCDECK_HOME: ${{ runner.temp }}/nocdeck-smoke
+        run: |
+          python -m nocdeck version
+          python -m nocdeck list
+          python -m nocdeck doctor || true
+          # The demo polls three imaginary devices with the real collector, the real
+          # thresholds and the real dashboard code, then draws the desktop window.
+          python -m nocdeck desktop --demo --shot "$RUNNER_TEMP/frame.png" --size 3 --warmup 2
+          test -s "$RUNNER_TEMP/frame.png"
+          python -m nocdeck export --out "$RUNNER_TEMP/inventory.json" --quiet
+          python -m nocdeck import "$RUNNER_TEMP/inventory.json" --quiet
