@@ -62,7 +62,7 @@ jobs:
           Write-Host "launching $($exe.Name)"
           $proc = Start-Process -FilePath $exe.FullName -ArgumentList '--demo','--shot',$frame,'--size','3','--warmup','2' -PassThru
           if (-not $proc.WaitForExit(90000)) { Stop-Process -Id $proc.Id -Force }
-          if (-not (Test-Path $frame) -or (Get-Item $frame).Length -lt 10000) {
+          if (-not (Test-Path $frame) -or (Get-Item $frame).Length -lt 4000) {
             Write-Error 'the frozen window never drew a frame — nothing was released'
           }
           Write-Host "the frozen window drew a frame: $((Get-Item $frame).Length) bytes"

@@ -345,7 +345,16 @@ def test_the_renderer_writes_a_png_and_leaves_a_store_the_web_can_serve(home, tm
     code = cli.main(["desktop", "--demo", "--shot", str(target), "--warmup", "3",
                      "--size", "4", "--tab", "device"])
     assert code == 0
-    assert target.exists() and target.stat().st_size > 20000
+    # It really drew a window, rather than merely writing a file: a PNG signature, a
+    # frame the size of the window, and enough pixels to be a page and not a blank.
+    # (A byte count alone is not a test — it depends on the fonts on the machine, and
+    # a Windows runner renders the same frame in fewer bytes than a Linux one.)
+    import struct
+
+    data = target.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    assert struct.unpack(">II", data[16:24]) == (1280, 820), "not the size of the window"
+    assert len(data) > 5000, "a blank frame, not a dashboard"
     store = Store(home / "nocdeck.db")
     assert len(store.devices()) == 4
     assert store.last_samples(), "the imaginary gear was polled"
