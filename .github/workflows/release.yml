@@ -36,16 +36,19 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p out
-          cp dist/nocdeck.exe "out/nocdeck-${version}-windows-cli.exe"
-          cp dist/nocdeck-desktop.exe "out/nocdeck-${version}-windows-desktop.exe"
+          # `nocdeck-cli-…` and `nocdeck-desktop-…`, never `nocdeck-…`: a glob of
+          # `nocdeck-*` would match both on Linux and the smoke test would run the
+          # windowed binary by accident (which is how this was found).
+          cp dist/nocdeck.exe "out/nocdeck-cli-${version}-windows.exe"
+          cp dist/nocdeck-desktop.exe "out/nocdeck-desktop-${version}-windows.exe"
       - name: Smoke-test the frozen command line
         shell: bash
         env:
           NOCDECK_HOME: ${{ runner.temp }}\nocdeck-cli-smoke
         run: |
-          ./out/nocdeck-*-windows-cli.exe version
-          ./out/nocdeck-*-windows-cli.exe list
-          ./out/nocdeck-*-windows-cli.exe summary
+          ./out/nocdeck-cli-*.exe version
+          ./out/nocdeck-cli-*.exe list
+          ./out/nocdeck-cli-*.exe summary
       - name: Smoke-test the frozen window
         shell: pwsh
         env:
@@ -57,7 +60,7 @@ jobs:
           # same test: a shell hands over its console and a build that dies before its
           # window appears looks perfectly healthy. So: run it the way the user does, but
           # with `--shot`, which draws one frame, writes a PNG and exits by itself.
-          $exe = Get-ChildItem out/nocdeck-*-windows-desktop.exe | Select-Object -First 1
+          $exe = Get-ChildItem out/nocdeck-desktop-*.exe | Select-Object -First 1
           $frame = Join-Path $env:RUNNER_TEMP 'frame.png'
           Write-Host "launching $($exe.Name)"
           $proc = Start-Process -FilePath $exe.FullName -ArgumentList '--demo','--shot',$frame,'--size','3','--warmup','2' -PassThru
@@ -105,17 +108,18 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p out
-          cp dist/nocdeck "out/nocdeck-${version}-linux-x86_64"
+          cp dist/nocdeck "out/nocdeck-cli-${version}-linux-x86_64"
           cp dist/nocdeck-desktop "out/nocdeck-desktop-${version}-linux-x86_64"
       - name: Smoke-test both frozen binaries
         env:
           QT_QPA_PLATFORM: offscreen
           NOCDECK_HOME: ${{ runner.temp }}/nocdeck-linux-smoke
         run: |
-          ./out/nocdeck-*-linux-x86_64 version
-          ./out/nocdeck-*-linux-x86_64 list
+          ./out/nocdeck-cli-*-linux-x86_64 version
+          ./out/nocdeck-cli-*-linux-x86_64 list
           # A frozen window with no flags would open an empty window and wait; `--shot`
-          # draws one frame and exits, which is the whole test.
+          # draws one frame and exits, which is the whole test. The `timeout` is the
+          # second net: the binary has its own watchdog, and CI has this one.
           timeout 240 ./out/nocdeck-desktop-*-linux-x86_64 --demo --shot "$RUNNER_TEMP/frame.png" --size 3 --warmup 2
           test -s "$RUNNER_TEMP/frame.png"
       - name: Upload the executables

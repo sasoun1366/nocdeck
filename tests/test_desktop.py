@@ -351,17 +351,17 @@ def test_the_renderer_writes_a_png_and_leaves_a_store_the_web_can_serve(home, tm
     # frame the width of the window and the height of a real one, and enough pixels to be
     # a page rather than a blank.
     #
-    # Neither the byte count nor the height is fixed: both depend on the fonts on the
-    # machine. A Windows runner renders this frame in fewer bytes than a Linux one, and
-    # a box with larger font metrics makes the settings tab taller, so Qt grows the
-    # window past the requested 820. The test says "a window, not a stub"; nothing more.
+    # Nothing about the exact frame is asserted, because nothing about it is this
+    # machine's business: a Windows runner with display scaling drew 1806x903 where Linux
+    # drew 1280x909, and the same frame costs a different number of bytes on each. The
+    # test says "a real window was drawn, not a stub and not a blank page" — the size of
+    # a small window, the signature of a PNG, and enough pixels to be a dashboard at all.
     import struct
 
     data = target.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
     width, height = struct.unpack(">II", data[16:24])
-    assert width == 1280 and 700 <= height <= 1500, "not the shape of the window: %dx%d" % (
-        width, height)
+    assert width >= 1000 and height >= 600, "not a window: %dx%d" % (width, height)
     assert len(data) > 5000, "a blank frame, not a dashboard"
     store = Store(home / "nocdeck.db")
     assert len(store.devices()) == 4

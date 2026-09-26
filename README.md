@@ -83,10 +83,10 @@ and skip Python entirely:
 
 | download | what it is |
 | --- | --- |
-| `nocdeck-<version>-windows-cli.exe` | the command line and the web dashboard for Windows |
-| `nocdeck-<version>-windows-desktop.exe` | the desktop window for Windows, no console |
-| `nocdeck-<version>-linux-x86_64` | the command line and the web dashboard for Linux |
-| `nocdeck-<version>-linux-x86_64-desktop` | the desktop window for Linux |
+| `nocdeck-cli-<version>-windows.exe` | the command line and the web dashboard for Windows |
+| `nocdeck-desktop-<version>-windows.exe` | the desktop window for Windows, no console |
+| `nocdeck-cli-<version>-linux-x86_64` | the command line and the web dashboard for Linux |
+| `nocdeck-desktop-<version>-linux-x86_64` | the desktop window for Linux |
 
 The Windows executables are built and smoke-tested on every tag: the release job
 launches the windowed one exactly the way a person double-clicking it would, with no
