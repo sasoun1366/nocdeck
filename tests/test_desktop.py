@@ -22,7 +22,6 @@ from nocdeck.config import Config                           # noqa: E402
 from nocdeck.model import AlertTarget, Device, Event, Reading, Thresholds  # noqa: E402
 from nocdeck.store import Store                             # noqa: E402
 
-from nocdeck.desktop import desktop as DESKTOP_IMPL         # noqa: E402
 from conftest import ago_iso                                # noqa: E402
 
 pytestmark = pytest.mark.skipif(not DESKTOP.available(),
@@ -32,6 +31,9 @@ if DESKTOP.available():
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication, QLabel
 
+    # Both of these import Qt at module level, so they belong inside the guard: without
+    # PyQt6 the whole file skips, and it must not fail first while being imported.
+    from nocdeck.desktop import desktop as DESKTOP_IMPL
     from nocdeck.desktop.desktop import MainWindow, PollWorker, WallWindow
 
 
@@ -346,14 +348,20 @@ def test_the_renderer_writes_a_png_and_leaves_a_store_the_web_can_serve(home, tm
                      "--size", "4", "--tab", "device"])
     assert code == 0
     # It really drew a window, rather than merely writing a file: a PNG signature, a
-    # frame the size of the window, and enough pixels to be a page and not a blank.
-    # (A byte count alone is not a test — it depends on the fonts on the machine, and
-    # a Windows runner renders the same frame in fewer bytes than a Linux one.)
+    # frame the width of the window and the height of a real one, and enough pixels to be
+    # a page rather than a blank.
+    #
+    # Neither the byte count nor the height is fixed: both depend on the fonts on the
+    # machine. A Windows runner renders this frame in fewer bytes than a Linux one, and
+    # a box with larger font metrics makes the settings tab taller, so Qt grows the
+    # window past the requested 820. The test says "a window, not a stub"; nothing more.
     import struct
 
     data = target.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
-    assert struct.unpack(">II", data[16:24]) == (1280, 820), "not the size of the window"
+    width, height = struct.unpack(">II", data[16:24])
+    assert width == 1280 and 700 <= height <= 1500, "not the shape of the window: %dx%d" % (
+        width, height)
     assert len(data) > 5000, "a blank frame, not a dashboard"
     store = Store(home / "nocdeck.db")
     assert len(store.devices()) == 4
