@@ -159,7 +159,9 @@ jobs:
           body_path: ${{ env.BODY_PATH }}
           draft: false
           prerelease: false
-          files: out/*.exe
+          # `out/*`, not `out/*.exe`: the Linux binaries have no extension, and this
+          # uploaded a Windows-only release the first time the tag was pushed.
+          files: out/*
       - name: Announce on Telegram
         # A release created by a workflow with GITHUB_TOKEN does not trigger other
         # workflows (GitHub's anti-recursion rule), so the announcement cannot rely on
