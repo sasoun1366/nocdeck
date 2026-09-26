@@ -71,6 +71,28 @@ class Out:
             print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
+def make_console_safe() -> None:
+    """Let this tool draw its boxes on a console that never learnt Unicode.
+
+    A Windows console is cp1252 or cp850 by default, and printing a `─` to one of those
+    raises UnicodeEncodeError — so `nocdeck list > file.txt` would end in a traceback
+    for the crime of drawing a separator. Ask for UTF-8 when the output really is a
+    console (Windows 10 and later can render it), and on everything else — a pipe, a
+    redirected file, a CI log — keep the encoding and never raise: an undrawable
+    character becomes `?` and the command still does its job.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:                              # a windowed build has no streams
+            continue
+        try:
+            encoding = (getattr(stream, "encoding", "") or "").lower()
+            if encoding and "utf" not in encoding and stream.isatty():
+                stream.reconfigure(encoding="utf-8")
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def blocks(values: Sequence[float], width: int = 34) -> str:
     """A sparkline for the terminal, because a table of numbers hides the shape."""
     numbers = [value for value in values if isinstance(value, (int, float))]
@@ -879,6 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    make_console_safe()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if not getattr(args, "command", None):

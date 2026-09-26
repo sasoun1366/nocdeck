@@ -8,6 +8,7 @@ The discovery tests replace the one function that goes to the network.
 from __future__ import annotations
 
 import json
+import pathlib
 import socket
 from datetime import timedelta
 
@@ -369,6 +370,43 @@ def test_events_of_a_store_without_events_is_a_green_exit(home, capsys):
 def test_the_file_in_the_way_is_reported(home, capsys):
     assert run(["show", "nothing-at-all"]) == 1
     assert "no device matches" in capsys.readouterr().err
+
+
+def test_the_command_line_survives_a_console_that_cannot_print_boxes(home, tmp_path):
+    """Windows consoles are cp1252 by default, and every screen here is drawn with `─`
+    and `·`. The first frozen Windows build died of exactly that, on the first command
+    in the smoke test — so this runs the real command in a child process with an
+    encoding that has no box-drawing characters in it."""
+    import os
+    import subprocess
+    import sys
+
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "cp1252"
+    environment["NOCDECK_HOME"] = str(home)
+    environment.pop("PYTHONPATH", None)
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run([sys.executable, "-m", "nocdeck", "list"], cwd=str(root),
+                            env=environment, capture_output=True, timeout=60)
+    # read the child's bytes as cp1252 — the box-drawing characters are already `?` in
+    # them, which is the whole point: it finished instead of dying on the encoding
+    stdout = result.stdout.decode("cp1252", "replace")
+    stderr = result.stderr.decode("cp1252", "replace")
+    assert result.returncode == 0, stderr[-400:]
+    assert "UnicodeEncodeError" not in stderr
+    assert "nocdeck" in stdout
+
+
+def test_an_undrawable_character_is_replaced_not_raised(home, monkeypatch):
+    import io
+
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(cli.sys, "stdout", stream)
+    monkeypatch.setattr(cli.sys, "stderr", stream)
+    cli.make_console_safe()
+    print("nocdeck ·──· ok")                              # must not raise
+    stream.flush()
+    assert b"ok" in stream.buffer.getvalue()
 
 
 def test_json_output_is_json(home, capsys):
