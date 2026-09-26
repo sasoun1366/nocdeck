@@ -169,12 +169,18 @@ class Device:
 
     # ---- SNMP
     snmp: bool = True
-    version: str = "2c"                         # 1, 2c, or 3 (v3 is reported, not polled)
-    community: str = "public"
+    version: str = "2c"                         # "1", "2c", or "3"
+    community: str = "public"                   # v1/v2c only
     port: int = 161
+    # ---- SNMPv3 (USM). `auth`/`priv` are protocol names ("sha256", "aes"); the keys
+    # hold the passphrases, or the already-localized keys in hex when `keys_are_hex`.
     user: str = ""
     auth: str = ""
+    auth_key: str = ""
     priv: str = ""
+    priv_key: str = ""
+    context: str = ""                           # a v3 context name; usually empty
+    keys_are_hex: bool = False
     interval: int = 60                          # seconds between polls
 
     # ---- other checks, all optional
@@ -211,11 +217,168 @@ class Device:
     def alive_interval(self) -> int:
         return max(10, int(self.interval))
 
+    #: Fields that must never reach a browser, a log line, or an export by accident.
+    SECRETS = ("community", "auth_key", "priv_key")
+
+    def credentials(self) -> str:
+        """What this device authenticates with, said without saying the secret."""
+        if self.version == "3":
+            return "v3 user %s (%s/%s)" % (self.user or "?", self.auth or "noAuth",
+                                           self.priv or "noPriv")
+        return "v%s community …%s" % (self.version, (self.community or "?")[-2:])
+
+    def validate(self) -> List[str]:
+        """Everything wrong with this device record, in words a person can act on.
+
+        One function, used by the add form, the desktop dialog and `nocdeck add`, so a
+        device cannot be saved by one route in a state another route would refuse.
+        """
+        problems: List[str] = []
+        if not (self.host or "").strip():
+            problems.append("an address is required (an IP or a hostname)")
+        if not 0 < int(self.port or 0) < 65536:
+            problems.append("port %s is not a port" % self.port)
+        version = str(self.version)
+        if version not in ("1", "2c", "3"):
+            problems.append("version %r is not one of 1, 2c, 3" % version)
+        if version == "3":
+            if not (self.user or "").strip():
+                problems.append("SNMPv3 needs a username — the community string is a "
+                                "v1/v2c idea and v3 has none")
+            if self.auth and not self.auth_key:
+                problems.append("authentication protocol %s is set but no passphrase is"
+                                % self.auth)
+            if self.priv and not self.auth:
+                problems.append("privacy (%s) requires authentication: RFC 3414 does not "
+                                "allow encrypting without authenticating" % self.priv)
+            if self.priv and not self.priv_key:
+                problems.append("privacy protocol %s is set but no passphrase is"
+                                % self.priv)
+            try:
+                from .snmpv3 import PRIV_PROTOCOLS, AUTH_PROTOCOLS
+                if self.auth and self.auth.lower() not in AUTH_PROTOCOLS:
+                    problems.append("unknown authentication protocol %r (%s)"
+                                    % (self.auth, ", ".join(sorted(set(AUTH_PROTOCOLS)))))
+                if self.priv and self.priv.lower() not in PRIV_PROTOCOLS:
+                    problems.append("unknown privacy protocol %r (%s)"
+                                    % (self.priv, ", ".join(sorted(set(PRIV_PROTOCOLS)))))
+            except ImportError:                     # pragma: no cover - always present
+                pass
+        elif not (self.community or "").strip():
+            problems.append("a v%s device needs a community string" % version)
+        if int(self.interval or 0) < 5:
+            problems.append("a poll interval under 5 seconds will flood a small device")
+        return problems
+
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def public_dict(self) -> Dict[str, Any]:
+        """The device as a dashboard, an API response or a log line may show it.
+
+        The passphrases stay out. A web dashboard is reachable from the network and a
+        JSON response is the easiest thing in the world to leave open, so the secrets
+        are replaced by whether they are set — which is all a person reading a device
+        list needs to know.
+        """
+        data = self.as_dict()
+        for field_name in self.SECRETS:
+            value = data.get(field_name) or ""
+            data[field_name] = ""
+            data["%s_set" % field_name] = bool(value)
+        return data
+
     def to_json(self) -> str:
         return json.dumps(self.as_dict(), ensure_ascii=False, sort_keys=True)
+
+    @classmethod
+    def from_payload(cls, payload: Dict[str, Any],
+                     existing: Optional["Device"] = None) -> "Device":
+        """A device built out of what a person typed into a form or a command line.
+
+        Two rules make the difference between a form people trust and a form that
+        quietly wipes their credentials:
+
+        * A secret that was left blank keeps the one already stored. A form always
+          submits its fields, so an empty passphrase box means "I did not retype it",
+          not "delete it".
+        * Anything the form did not mention keeps its old value, so a web form that
+          knows about five fields cannot drop the ten fields it never showed.
+        """
+        existing = existing or cls(name="", host="")
+        payload = payload or {}
+
+        def text(name: str, fallback=None):
+            if name not in payload:
+                return getattr(existing, name) if fallback is None else fallback
+            value = payload.get(name)
+            if value is None:
+                return getattr(existing, name)
+            return str(value).strip()
+
+        def number(name: str, default: int) -> int:
+            raw = payload.get(name, None)
+            if raw in (None, ""):
+                return int(getattr(existing, name, default) or default)
+            try:
+                return int(str(raw).strip())
+            except (TypeError, ValueError):
+                return int(getattr(existing, name, default) or default)
+
+        def flag(name: str, default: bool) -> bool:
+            if name not in payload:
+                return bool(getattr(existing, name, default))
+            value = payload.get(name)
+            if isinstance(value, str):
+                return value.strip().lower() not in ("", "0", "false", "off", "no")
+            return bool(value)
+
+        def secret(name: str) -> str:
+            typed = str(payload.get(name) or "").strip()
+            return typed or str(getattr(existing, name, "") or "")
+
+        def ports() -> List[int]:
+            raw = payload.get("tcp_ports", None)
+            if raw is None:
+                return list(existing.tcp_ports)
+            if isinstance(raw, str):
+                raw = [part for part in raw.replace(" ", ",").split(",") if part]
+            out: List[int] = []
+            for part in raw:
+                try:
+                    port = int(part)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < port < 65536 and port not in out:
+                    out.append(port)
+            return out
+
+        device = cls(
+            name=text("name") or text("host") or existing.name,
+            host=text("host") or existing.host,
+            id=str(payload.get("id") or "").strip() or slug(text("name") or text("host")
+                                                            or existing.name or ""),
+            kind=text("kind") or existing.kind,
+            group=text("group"), location=text("location"), notes=text("notes"),
+            version=text("version") or existing.version, port=number("port", 161),
+            community=secret("community"),
+            user=text("user"), auth=text("auth"), auth_key=secret("auth_key"),
+            priv=text("priv"), priv_key=secret("priv_key"), context=text("context"),
+            keys_are_hex=flag("keys_are_hex", False),
+            interval=number("interval", 60), snmp=flag("snmp", True),
+            ping=flag("ping", True), snmp_only=flag("snmp_only", existing.snmp_only),
+            tcp_ports=ports(), http_url=text("http_url"),
+            expect_status=number("expect_status", 0),
+            tls_warn_days=number("tls_warn_days", existing.tls_warn_days),
+            enabled=flag("enabled", True),
+            tags=[str(tag).strip() for tag in (payload.get("tags")
+                                               or existing.tags or [])
+                  if str(tag).strip()] if not isinstance(payload.get("tags"), str)
+            else [tag.strip() for tag in str(payload.get("tags")).split(",") if tag.strip()],
+        )
+        device.address = str(payload.get("address") or existing.address or "").strip()
+        device.first_seen = existing.first_seen or iso()
+        return device
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Device":
@@ -296,8 +459,76 @@ class Interface:
         self.error_delta = max(0, (self.in_errors + self.out_errors)
                                - (previous.in_errors + previous.out_errors))
 
+    #: Fields that must never reach a browser, a log line, or an export by accident.
+    SECRETS = ("community", "auth_key", "priv_key")
+
+    def credentials(self) -> str:
+        """What this device authenticates with, said without saying the secret."""
+        if self.version == "3":
+            return "v3 user %s (%s/%s)" % (self.user or "?", self.auth or "noAuth",
+                                           self.priv or "noPriv")
+        return "v%s community …%s" % (self.version, (self.community or "?")[-2:])
+
+    def validate(self) -> List[str]:
+        """Everything wrong with this device record, in words a person can act on.
+
+        One function, used by the add form, the desktop dialog and `nocdeck add`, so a
+        device cannot be saved by one route in a state another route would refuse.
+        """
+        problems: List[str] = []
+        if not (self.host or "").strip():
+            problems.append("an address is required (an IP or a hostname)")
+        if not 0 < int(self.port or 0) < 65536:
+            problems.append("port %s is not a port" % self.port)
+        version = str(self.version)
+        if version not in ("1", "2c", "3"):
+            problems.append("version %r is not one of 1, 2c, 3" % version)
+        if version == "3":
+            if not (self.user or "").strip():
+                problems.append("SNMPv3 needs a username — the community string is a "
+                                "v1/v2c idea and v3 has none")
+            if self.auth and not self.auth_key:
+                problems.append("authentication protocol %s is set but no passphrase is"
+                                % self.auth)
+            if self.priv and not self.auth:
+                problems.append("privacy (%s) requires authentication: RFC 3414 does not "
+                                "allow encrypting without authenticating" % self.priv)
+            if self.priv and not self.priv_key:
+                problems.append("privacy protocol %s is set but no passphrase is"
+                                % self.priv)
+            try:
+                from .snmpv3 import PRIV_PROTOCOLS, AUTH_PROTOCOLS
+                if self.auth and self.auth.lower() not in AUTH_PROTOCOLS:
+                    problems.append("unknown authentication protocol %r (%s)"
+                                    % (self.auth, ", ".join(sorted(set(AUTH_PROTOCOLS)))))
+                if self.priv and self.priv.lower() not in PRIV_PROTOCOLS:
+                    problems.append("unknown privacy protocol %r (%s)"
+                                    % (self.priv, ", ".join(sorted(set(PRIV_PROTOCOLS)))))
+            except ImportError:                     # pragma: no cover - always present
+                pass
+        elif not (self.community or "").strip():
+            problems.append("a v%s device needs a community string" % version)
+        if int(self.interval or 0) < 5:
+            problems.append("a poll interval under 5 seconds will flood a small device")
+        return problems
+
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> Dict[str, Any]:
+        """The device as a dashboard, an API response or a log line may show it.
+
+        The passphrases stay out. A web dashboard is reachable from the network and a
+        JSON response is the easiest thing in the world to leave open, so the secrets
+        are replaced by whether they are set — which is all a person reading a device
+        list needs to know.
+        """
+        data = self.as_dict()
+        for field_name in self.SECRETS:
+            value = data.get(field_name) or ""
+            data[field_name] = ""
+            data["%s_set" % field_name] = bool(value)
+        return data
 
 
 # --------------------------------------------------------------------- readings
@@ -384,8 +615,76 @@ class Event:
     notified: bool = False
     detail: Dict[str, Any] = field(default_factory=dict)
 
+    #: Fields that must never reach a browser, a log line, or an export by accident.
+    SECRETS = ("community", "auth_key", "priv_key")
+
+    def credentials(self) -> str:
+        """What this device authenticates with, said without saying the secret."""
+        if self.version == "3":
+            return "v3 user %s (%s/%s)" % (self.user or "?", self.auth or "noAuth",
+                                           self.priv or "noPriv")
+        return "v%s community …%s" % (self.version, (self.community or "?")[-2:])
+
+    def validate(self) -> List[str]:
+        """Everything wrong with this device record, in words a person can act on.
+
+        One function, used by the add form, the desktop dialog and `nocdeck add`, so a
+        device cannot be saved by one route in a state another route would refuse.
+        """
+        problems: List[str] = []
+        if not (self.host or "").strip():
+            problems.append("an address is required (an IP or a hostname)")
+        if not 0 < int(self.port or 0) < 65536:
+            problems.append("port %s is not a port" % self.port)
+        version = str(self.version)
+        if version not in ("1", "2c", "3"):
+            problems.append("version %r is not one of 1, 2c, 3" % version)
+        if version == "3":
+            if not (self.user or "").strip():
+                problems.append("SNMPv3 needs a username — the community string is a "
+                                "v1/v2c idea and v3 has none")
+            if self.auth and not self.auth_key:
+                problems.append("authentication protocol %s is set but no passphrase is"
+                                % self.auth)
+            if self.priv and not self.auth:
+                problems.append("privacy (%s) requires authentication: RFC 3414 does not "
+                                "allow encrypting without authenticating" % self.priv)
+            if self.priv and not self.priv_key:
+                problems.append("privacy protocol %s is set but no passphrase is"
+                                % self.priv)
+            try:
+                from .snmpv3 import PRIV_PROTOCOLS, AUTH_PROTOCOLS
+                if self.auth and self.auth.lower() not in AUTH_PROTOCOLS:
+                    problems.append("unknown authentication protocol %r (%s)"
+                                    % (self.auth, ", ".join(sorted(set(AUTH_PROTOCOLS)))))
+                if self.priv and self.priv.lower() not in PRIV_PROTOCOLS:
+                    problems.append("unknown privacy protocol %r (%s)"
+                                    % (self.priv, ", ".join(sorted(set(PRIV_PROTOCOLS)))))
+            except ImportError:                     # pragma: no cover - always present
+                pass
+        elif not (self.community or "").strip():
+            problems.append("a v%s device needs a community string" % version)
+        if int(self.interval or 0) < 5:
+            problems.append("a poll interval under 5 seconds will flood a small device")
+        return problems
+
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> Dict[str, Any]:
+        """The device as a dashboard, an API response or a log line may show it.
+
+        The passphrases stay out. A web dashboard is reachable from the network and a
+        JSON response is the easiest thing in the world to leave open, so the secrets
+        are replaced by whether they are set — which is all a person reading a device
+        list needs to know.
+        """
+        data = self.as_dict()
+        for field_name in self.SECRETS:
+            value = data.get(field_name) or ""
+            data[field_name] = ""
+            data["%s_set" % field_name] = bool(value)
+        return data
 
     def fingerprint(self) -> str:
         """Two events with the same fingerprint are the same trouble, still going on."""
@@ -412,8 +711,76 @@ class AlertTarget:
     enabled: bool = True
     quiet_hours: str = ""          # "23:00-07:00", local time
 
+    #: Fields that must never reach a browser, a log line, or an export by accident.
+    SECRETS = ("community", "auth_key", "priv_key")
+
+    def credentials(self) -> str:
+        """What this device authenticates with, said without saying the secret."""
+        if self.version == "3":
+            return "v3 user %s (%s/%s)" % (self.user or "?", self.auth or "noAuth",
+                                           self.priv or "noPriv")
+        return "v%s community …%s" % (self.version, (self.community or "?")[-2:])
+
+    def validate(self) -> List[str]:
+        """Everything wrong with this device record, in words a person can act on.
+
+        One function, used by the add form, the desktop dialog and `nocdeck add`, so a
+        device cannot be saved by one route in a state another route would refuse.
+        """
+        problems: List[str] = []
+        if not (self.host or "").strip():
+            problems.append("an address is required (an IP or a hostname)")
+        if not 0 < int(self.port or 0) < 65536:
+            problems.append("port %s is not a port" % self.port)
+        version = str(self.version)
+        if version not in ("1", "2c", "3"):
+            problems.append("version %r is not one of 1, 2c, 3" % version)
+        if version == "3":
+            if not (self.user or "").strip():
+                problems.append("SNMPv3 needs a username — the community string is a "
+                                "v1/v2c idea and v3 has none")
+            if self.auth and not self.auth_key:
+                problems.append("authentication protocol %s is set but no passphrase is"
+                                % self.auth)
+            if self.priv and not self.auth:
+                problems.append("privacy (%s) requires authentication: RFC 3414 does not "
+                                "allow encrypting without authenticating" % self.priv)
+            if self.priv and not self.priv_key:
+                problems.append("privacy protocol %s is set but no passphrase is"
+                                % self.priv)
+            try:
+                from .snmpv3 import PRIV_PROTOCOLS, AUTH_PROTOCOLS
+                if self.auth and self.auth.lower() not in AUTH_PROTOCOLS:
+                    problems.append("unknown authentication protocol %r (%s)"
+                                    % (self.auth, ", ".join(sorted(set(AUTH_PROTOCOLS)))))
+                if self.priv and self.priv.lower() not in PRIV_PROTOCOLS:
+                    problems.append("unknown privacy protocol %r (%s)"
+                                    % (self.priv, ", ".join(sorted(set(PRIV_PROTOCOLS)))))
+            except ImportError:                     # pragma: no cover - always present
+                pass
+        elif not (self.community or "").strip():
+            problems.append("a v%s device needs a community string" % version)
+        if int(self.interval or 0) < 5:
+            problems.append("a poll interval under 5 seconds will flood a small device")
+        return problems
+
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> Dict[str, Any]:
+        """The device as a dashboard, an API response or a log line may show it.
+
+        The passphrases stay out. A web dashboard is reachable from the network and a
+        JSON response is the easiest thing in the world to leave open, so the secrets
+        are replaced by whether they are set — which is all a person reading a device
+        list needs to know.
+        """
+        data = self.as_dict()
+        for field_name in self.SECRETS:
+            value = data.get(field_name) or ""
+            data[field_name] = ""
+            data["%s_set" % field_name] = bool(value)
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AlertTarget":

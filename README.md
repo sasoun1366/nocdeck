@@ -17,8 +17,9 @@ screen and on the wall.**
 
 </div>
 
-`nocdeck` polls your equipment over SNMP v1/v2c, and everything that does not speak SNMP
-over ICMP, TCP and HTTP. It keeps the history, draws the graphs, watches the warning
+`nocdeck` polls your equipment over SNMP **v1, v2c and v3** — v3 with real USM
+authentication and AES/DES encryption — and everything that does not speak SNMP over
+ICMP, TCP and HTTP. It keeps the history, draws the graphs, watches the warning
 lines and tells you when one is crossed — on Telegram, by email, or to a webhook. Two
 front doors, one engine: a **web dashboard** you can open from anywhere and a **desktop
 window** for the machine in the NOC.
@@ -102,14 +103,19 @@ For the desktop window, Linux also wants the usual Qt system libraries
 nocdeck demo
 ```
 
-That builds **eleven imaginary devices** — a core switch pair, access switches, a
+That builds **eleven imaginary devices**, one of them speaking SNMPv3 — the firewall is
+polled with a username and two passphrases, through the same USM code path your real gear
+will use — a core switch pair, access switches, a
 firewall, a router, servers, a printer and a UPS — answers every SNMP query with a fake
 agent that implements the same OIDs a real one would, polls them through the real
 collector, thresholds, database and dashboard, and serves it on
 <http://localhost:8090>. Ninety seconds in, the lobby access point loses power and the
 alerts fire; four minutes in, a port drops; on the file server, a temperature climbs
 toward its warning line. Nothing is faked after the SNMP socket: what the demo shows you
-is what a real switch would drive.
+is what a real switch would drive. The demo refuses what real gear refuses, too — add
+`10.20.0.10` with the wrong passphrase and it answers with the same
+`usmStatsWrongDigests` report a switch would, so the flow can be rehearsed before it is
+pointed at production.
 
 Then point it at your own network:
 
@@ -122,8 +128,48 @@ nocdeck desktop                                     # the same thing, in a windo
 ```
 
 (The `scan` sweep tries the communities you give it, in order, and reports which one
-answered. SNMP v3 is *detected* and reported — the standard library has no AES or DES,
-so v3 needs `pysnmp`, and the tool says so instead of pretending.)
+answered.)
+
+## Adding a device
+
+Three ways, all reaching the same record, and all of them talk to the device once and
+tell you what it said before you trust it in the fleet.
+
+**In the desktop window** — *add device* on the toolbar, or `Ctrl+N`:
+
+<img src="docs/desktop-add-device.png" alt="the add-device dialog: address, port, SNMP version and the credentials" width="880">
+
+**In the web dashboard** — <http://localhost:8090/add> — the same fields, and a
+`test connection` button that polls without saving anything.
+
+**From a shell:**
+
+```bash
+nocdeck add 10.20.0.2 --name core-sw-01 --kind switch --group dc
+nocdeck add 10.20.0.10 --name fw-hq --kind firewall \
+  --version 3 --user nocmon --auth sha256 --auth-key 'the-passphrase' \
+  --priv aes --priv-key 'the-passphrase'
+```
+
+What each credential is, in one table, because this is where people get stuck:
+
+| SNMP version | What it authenticates with | Credential |
+|---|---|---|
+| v1 / v2c | a community string, sent in clear — a password people still type `public` | `--community public` |
+| v3, noAuthNoPriv | a username, nothing else | `--version 3 --user nocmon` |
+| v3, authNoPriv | a username and an HMAC — the request is signed, not encrypted | `+ --auth sha256 --auth-key '…'` |
+| v3, authPriv | the above, and the whole conversation is encrypted | `+ --priv aes --priv-key '…'` |
+
+So **username and password means SNMPv3**: v1/v2c has no username at all, only a
+community string. nocdeck implements v3 itself — the password-to-key algorithm of RFC
+3414, MD5, SHA-1 and the SHA-2 family, AES-128 and CBC-DES privacy, engine discovery and
+the timeliness check — in the standard library, with the published test vectors pinned in
+the suite. No `pysnmp`, no build step, nothing to install on the device.
+
+The dialog and the form never show you a stored passphrase, and leaving one blank keeps
+it: retyping is for when you mean to change it. The web API and `nocdeck show --json`
+never return secrets at all — `nocdeck export` writes a full, restorable inventory, so
+treat that file like the keys to the building.
 
 ## Alerts that behave
 
@@ -164,7 +210,8 @@ another machine — which is how you move a monitoring box without losing its hi
 
 ```text
 nocdeck scan      sweep a range and ask what is there
-nocdeck add       add a device (or everything a scan found) to the inventory
+nocdeck add       add a device (or everything a scan found) to the inventory;
+                  --version 3 --user --auth --auth-key --priv --priv-key for SNMPv3
 nocdeck list      the inventory, with the last reading
 nocdeck show      one device in detail, with its ports and its history
 nocdeck poll      read the devices now
@@ -183,7 +230,8 @@ nocdeck version   what this is
 
 ## How it is built
 
-Fifteen modules, no dependencies, and a rule for each one: `snmp` is the wire, `mibs` is
+Eighteen modules, no dependencies, and a rule for each one: `snmp` is the wire, `snmpv3`
+is the security model on top of it, `crypto` is the two block ciphers v3 needs, `mibs` is
 the data (add a vendor with a JSON file in `~/.nocdeck/mibs/`, no code), `poller` is the
 cycle, `model` is the one place thresholds are decided, `store` is SQLite and nothing
 else, `web` and `desktop` are two views with no logic of their own.
@@ -192,14 +240,16 @@ That last one is the important one: the window and the web page call the same
 `store`, the same snapshot, the same thresholds. A device looks identical in both, and a
 bug has one place to live.
 
-`python -m pytest` runs 181 tests in about sixteen seconds. The suite needs no network:
+`python -m pytest` runs 248 tests in about half a minute. The suite needs no network:
 the SNMP codec is driven with scripted sockets, the collector with a fake agent that
 answers the real OIDs, the demo with the same simulator the command line uses. Two
 things are worth knowing about it:
 
 ```bash
 python -m pytest tests/test_snmp.py     # the wire format, byte for byte
+python -m pytest tests/test_snmpv3.py   # USM against an agent that checks the crypto
 python -m pytest tests/test_engine.py   # thresholds, hysteresis, rate arithmetic
+python -m pytest tests/test_add.py      # adding a device, and what it refuses
 ```
 
 See [docs/DESIGN.md](docs/DESIGN.md) for why the codec is hand-written and what each

@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import mibs
 from .model import (CLASS_THRESHOLDS, STATUS_COLOUR, STATUS_ORDER, Device, Event, Interface,
-                    Reading, human_bps, human_bytes, human_seconds, now_utc, parse_iso)
+                    Reading, human_bps, human_bytes, human_seconds, now_utc, parse_iso, slug)
 
 CSS = """
 :root{color-scheme:dark;--bg:#0b1017;--panel:#141d29;--panel2:#1a2534;--line:#22303f;
@@ -52,7 +52,7 @@ header .clock{color:var(--dim);font-size:13px;margin-inline-start:auto}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 .filters a,.filters button{border:1px solid var(--line);background:var(--panel);color:var(--text);
        border-radius:999px;padding:6px 13px;font-size:13px;cursor:pointer}
-.filters a.on{background:#1d3category;border-color:#2f5d86;background:#182a3d}
+.filters a.on{border-color:#2f5d86;background:#182a3d}
 input[type=search]{background:var(--panel);border:1px solid var(--line);border-radius:999px;
        color:var(--text);padding:7px 14px;font-size:13.5px;min-width:220px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
@@ -99,6 +99,20 @@ footer{color:var(--dim);font-size:12.5px;text-align:center;padding:26px 10px 40p
 .wallcard .s{font-size:12.5px;color:var(--dim)}
 button.act{background:#182a3d;border:1px solid #2f5d86;color:var(--text);border-radius:8px;
            padding:6px 12px;font-size:13px;cursor:pointer}
+form.stack{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;
+           align-items:end}
+form.stack label{display:flex;flex-direction:column;gap:5px;color:var(--dim);font-size:12.5px}
+form.stack input,form.stack select{background:var(--panel2);border:1px solid var(--line);
+           border-radius:9px;color:var(--text);padding:9px 11px;font-size:14px;width:100%}
+form.stack input:focus,form.stack select:focus{outline:none;border-color:#2f5d86}
+form.stack .wide{grid-column:1/-1}
+form.stack .check{flex-direction:row;align-items:center;gap:8px;color:var(--text)}
+form.stack .check input{width:auto}
+form.stack button{border-radius:9px;padding:10px 16px;font-size:14px;cursor:pointer;
+           background:#1d4b74;border:1px solid #2f6d9e;color:#fff}
+.hint{color:var(--dim);font-size:12.5px;margin:8px 0 0}
+.warnbox{border:1px solid #63501f;background:#2b2210;border-radius:10px;padding:10px 13px;
+           color:#ffd9a0;font-size:13px;margin-bottom:14px}
 """
 
 JS = """
@@ -128,9 +142,67 @@ JS = """
       .then(function(r){return r.text()})
       .then(function(html){var node=document.querySelector("#cards"); if(node){node.innerHTML=html;}})
       .catch(function(){})
-      .finally(function(){button.disabled=false; button.textContent="بازخوانی"};
-    );
+      .finally(function(){button.disabled=false; button.textContent="بازخوانی / poll now";});
   });
+  document.addEventListener("submit", function(event){
+    var form = event.target;
+    if(!form || form.getAttribute("data-json") !== "device"){return}
+    event.preventDefault();
+    var out = document.getElementById("result");
+    var payload = {};
+    Array.prototype.forEach.call(form.elements, function(el){
+      if(!el.name){return}
+      if(el.type === "checkbox"){payload[el.name] = el.checked}
+      else if(el.value !== ""){payload[el.name] = el.value}
+      else if(el.type === "password"){payload[el.name] = ""}
+    });
+    var button = form.querySelector("button[type=submit]");
+    if(button){button.disabled=true; button.textContent="در حال بررسی… / checking…";}
+    if(out){out.innerHTML = "<div class=\'panel\'>talking to the device…</div>";}
+    fetch("/api/devices", {method:"POST", headers:{"Content-Type":"application/json"},
+                           body: JSON.stringify(payload)})
+      .then(function(r){return r.json()})
+      .then(function(data){
+        if(!out){return}
+        out.innerHTML = "";
+        (data.problems || []).forEach(function(problem){
+          out.insertAdjacentHTML("beforeend",
+            "<div class=\'panel\' style=\'border-color:#632424\'>⚠ " + problem + "</div>");
+        });
+        if(data.message){
+          out.insertAdjacentHTML("beforeend", "<div class=\'panel\'>" + data.message + "</div>");
+        }
+        if(data.ok && data.device){
+          out.insertAdjacentHTML("beforeend",
+            "<div class=\'panel\'>✅ added <b>" + data.device.name + "</b> — <a href=\'/device/" +
+            data.device.id + "\'>open it</a> · <a href=\'/\'>the fleet</a></div>");
+          form.reset();
+        }
+      })
+      .catch(function(error){
+        if(out){out.innerHTML = "<div class=\'panel\'>✗ " + error + "</div>";}
+      })
+      .finally(function(){if(button){button.disabled=false; button.textContent="افزودن / add device";}});
+  });
+  document.addEventListener("click", function(event){
+    var button = event.target.closest("[data-remove]");
+    if(!button){return}
+    var name = button.getAttribute("data-remove");
+    if(!confirm("remove " + name + " from the inventory?")){return}
+    button.disabled = true;
+    fetch("/api/remove/" + name, {method:"POST"})
+      .then(function(){location.href = "/";})
+      .catch(function(){button.disabled = false;});
+  });
+  document.addEventListener("change", function(event){
+    var field = event.target;
+    if(!field || field.name !== "version"){return}
+    var v3 = field.value === "3";
+    document.querySelectorAll("[data-v3]").forEach(function(node){node.hidden = !v3;});
+    document.querySelectorAll("[data-v12]").forEach(function(node){node.hidden = v3;});
+  });
+  var versionField = document.querySelector("select[name=version]");
+  if(versionField){versionField.dispatchEvent(new Event("change"));}
 })();
 """
 
@@ -221,6 +293,24 @@ def status_pill(status: str, text: str = "") -> str:
     return '<span class="pill %s">%s</span>' % (esc(status), esc(text or status))
 
 
+def _truthy(value) -> bool:
+    """`True`, `"on"`, `"1"` and a ticked checkbox all mean yes."""
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "off", "no")
+    return bool(value)
+
+
+def _round(value) -> str:
+    """A metric for a human: two decimals is plenty for a load average or a dBm."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return esc(value)
+    if abs(number - round(number)) < 0.05:
+        return "%d" % round(number)
+    return "%.2f" % number
+
+
 def when_text(stamp: str) -> str:
     when = parse_iso(stamp)
     if not when:
@@ -250,13 +340,14 @@ def page(title: str, body: str, config, refresh: bool = True, nav: bool = True) 
 %(body)s
 </div>
 <footer>nocdeck · <a href="https://github.com/sasoun1366/nocdeck">github.com/sasoun1366/nocdeck</a>
- · <a href="/events">events</a> · <a href="/wall">wall</a> · <a href="/api/summary">api</a></footer>
+ · <a href="/events">events</a> · <a href="/wall">wall</a> ·
+ <a href="/add">add device</a> · <a href="/api/summary">api</a></footer>
 <noscript><meta http-equiv="refresh" content="%(refresh)d"></noscript>
 <script>%(js)s</script>
 </body></html>
 """ % {"title": esc(title), "css": CSS, "body": body, "brand": esc(config.title),
        "nav": ('<a href="/">fleet</a> · <a href="/events">events</a> · '
-               '<a href="/wall">wall</a>') if nav else "",
+               '<a href="/wall">wall</a> · <a href="/add">add device</a>') if nav else "",
        "now": now_utc().strftime("%H:%M:%S") + " UTC",
        "refresh": config.refresh_seconds if refresh else 3600,
        "js": JS % {"refresh": config.refresh_seconds} if refresh else ""}
@@ -496,8 +587,10 @@ class Dashboard:
                                  ("PoE %s W" % facts.get("poe_watts")) if facts.get("poe_watts") else "",
                                  ("%s processes" % facts.get("processes")) if facts.get("processes") else ""]
                    if value),
-               '<div class="kv"><button class="act" data-poll="%s">بازخوانی / poll now</button></div>'
-               % esc(device.key()),
+               '<div class="kv"><button class="act" data-poll="%s">بازخوانی / poll now'
+               '</button> <button class="act" data-remove="%s" style="background:#3a1a1a;'
+               'border-color:#632424">حذف / remove</button></div>'
+               % (esc(device.key()), esc(device.key())),
                "</div>"]
 
         metrics_html = []
@@ -605,6 +698,222 @@ class Dashboard:
         return page("nocdeck — wall", '<div class="wallgrid">%s</div>' % "".join(cards),
                     self.config, nav=False)
 
+    # ------------------------------------------------------------------ adding
+    def add_form(self, prefill: Optional[Dict[str, str]] = None) -> str:
+        """The form that turns an address and a password into a monitored device.
+
+        The credentials a person types here go to the nocdeck server and then to the
+        device. Over plain HTTP on a shared network that means the wire can read them,
+        which is why the form says so out loud and the footer offers the two ways to
+        avoid it: the desktop app, or `nocdeck add` on the box itself.
+        """
+        from .snmpv3 import AUTH_PROTOCOLS, PRIV_PROTOCOLS
+
+        values = dict(prefill or {})
+        auth_names = ["", *sorted(set(AUTH_PROTOCOLS))]
+        priv_names = ["", *sorted(set(PRIV_PROTOCOLS))]
+
+        def value(name: str, default: str = "") -> str:
+            return esc(values.get(name, default))
+
+        def options(names, chosen: str) -> str:
+            return "".join('<option value="%s"%s>%s</option>'
+                           % (esc(name), " selected" if name == chosen else "",
+                              esc(name or "— none —"))
+                           for name in names)
+
+        host = value("host")
+        form = """
+<div class="panel">
+  <h2>add a device · افزودن دستگاه</h2>
+  <div class="warnbox">The credentials on this page travel to this server and then to
+  the device. Over plain HTTP anyone on the path can read them — on a shared network use
+  the desktop app, or <span class="mono">nocdeck add</span> on this machine.
+  <br>فارسی: رمزها روی شبکه فرستاده می‌شوند؛ روی شبکه عمومی از برنامهٔ دسکتاپ یا
+  خط فرمان استفاده کنید.</div>
+  <form class="stack" data-json="device" autocomplete="off">
+    <label>name <span class="dim">a word a human will recognise</span>
+      <input name="name" placeholder="core-sw-01" value="%(name)s"></label>
+    <label>address · IP or hostname
+      <input name="host" placeholder="10.20.0.2" value="%(host)s" required></label>
+    <label>port <input name="port" value="%(port)s" inputmode="numeric"></label>
+    <label>kind
+      <select name="kind">%(kinds)s</select></label>
+    <label>group <input name="group" placeholder="dc, campus" value="%(group)s"></label>
+    <label>location <input name="location" placeholder="rack 3, floor 2" value="%(location)s"></label>
+
+    <label class="wide">SNMP version
+      <select name="version">%(versions)s</select></label>
+
+    <div class="wide" data-v12 style="display:contents">
+      <label>community string <span class="dim">v1/v2c · like a password, often "public"</span>
+        <input name="community" placeholder="public" value="%(community)s"></label>
+    </div>
+
+    <div class="wide" data-v3>
+      <div class="hint">SNMPv3 · a username and passphrases instead of a community
+      string. Authentication is required; privacy (encryption) is optional but
+      recommended.</div>
+    </div>
+    <label data-v3>v3 username <input name="user" value="%(user)s"></label>
+    <label data-v3>authentication
+      <select name="auth">%(auths)s</select></label>
+    <label data-v3>authentication passphrase
+      <input name="auth_key" type="password" autocomplete="new-password" value=""></label>
+    <label data-v3>privacy (encryption)
+      <select name="priv">%(privs)s</select></label>
+    <label data-v3>privacy passphrase
+      <input name="priv_key" type="password" autocomplete="new-password" value=""></label>
+    <label data-v3>context name <span class="dim">usually empty</span>
+      <input name="context" value="%(context)s"></label>
+
+    <label>poll every (seconds) <input name="interval" value="%(interval)s"
+      inputmode="numeric"></label>
+    <label>watch these TCP ports <input name="tcp_ports" placeholder="22,443"
+      value="%(tcp)s"></label>
+    <label>watch this URL <input name="http_url" placeholder="https://10.20.0.2/"
+      value="%(http)s"></label>
+    <label>tags <input name="tags" placeholder="core, rack1" value="%(tags)s"></label>
+    <label>notes <input name="notes" value="%(notes)s"></label>
+    <label class="check"><input type="checkbox" name="snmp" %(snmp)s> ask it over SNMP</label>
+    <label class="check"><input type="checkbox" name="ping" %(ping)s> ping it</label>
+    <label class="check"><input type="checkbox" name="snmp_only" %(snmp_only)s> SNMP only
+      (no ping)</label>
+    <div class="wide">
+      <button type="submit">افزودن / add device</button>
+      <span class="hint">nocdeck talks to the device once and tells you what it heard —
+      before you trust it in the fleet.</span>
+    </div>
+  </form>
+</div>
+<div id="result"></div>
+<div class="panel">
+  <h2>or, from a shell</h2>
+  <div class="mono">nocdeck add 10.20.0.2 --name core-sw-01 --version 3 --user nocmon \
+    --auth sha256 --auth-key 'passphrase' --priv aes --priv-key 'passphrase'</div>
+  <div class="hint">Arguments are visible in a shell's history and in <span
+  class="mono">ps</span>; the form is not. Neither is a reason to be careless.</div>
+</div>
+""" % {
+            "name": value("name"), "host": host, "port": value("port", "161"),
+            "group": value("group"), "location": value("location"),
+            "community": value("community", "public"),
+            "user": value("user"), "context": value("context"),
+            "interval": value("interval", "60"), "tcp": value("tcp_ports"),
+            "http": value("http_url"), "tags": value("tags"), "notes": value("notes"),
+            "versions": options(["1", "2c", "3"], values.get("version", "2c")),
+            "kinds": options(["generic", "switch", "router", "firewall", "server", "ap",
+                              "ups", "printer", "storage", "camera"],
+                             values.get("kind", "switch")),
+            "auths": options(auth_names, values.get("auth", "sha256")),
+            "privs": options(priv_names, values.get("priv", "aes")),
+            "snmp": "checked" if values.get("snmp", True) not in (False, "off", "0") else "",
+            "ping": "checked" if values.get("ping", True) not in (False, "off", "0") else "",
+            "snmp_only": "checked" if values.get("snmp_only") else "",
+        }
+        return page("nocdeck — add a device", form, self.config, refresh=False)
+
+    def add_device(self, payload: Dict[str, object], test_only: bool = False,
+                   force: bool = False) -> Dict[str, object]:
+        """Validate, save, and take one honest look at the device.
+
+        The first poll is the whole point: a person who just typed a passphrase wants to
+        know whether the device accepted it, and "added" followed by a red card five
+        minutes later is a worse answer than the real one now.
+        """
+        payload = dict(payload or {})
+        test_only = test_only or _truthy(payload.pop("test_only", False))
+        force = force or _truthy(payload.pop("force", False))
+        host = str(payload.get("host") or "").strip()
+        if not host:
+            return {"ok": False, "problems": ["an address is required"]}
+        key = slug(str(payload.get("name") or host))
+        existing = self.store.get_device(key)
+        if existing and not test_only and not force:
+            return {"ok": False, "conflict": key,
+                    "problems": ["%s is already in the inventory — send force to "
+                                 "overwrite it, or add it under another name" % key]}
+        device = Device.from_payload(payload, existing=existing)
+        problems = device.validate()
+        if problems:
+            return {"ok": False, "problems": problems}
+        saved = not test_only
+        if saved:
+            self.store.save_device(device)
+        outcome = self._first_poll(device, save=not test_only)
+        return {"ok": True, "problems": [], "saved": saved,
+                "device": device.public_dict(), "credentials": device.credentials(),
+                "status": outcome.reading.status,
+                "seconds": round(outcome.reading.seconds, 2),
+                "latency_ms": outcome.reading.latency_ms,
+                "metrics": outcome.reading.metrics,
+                "events": [event.as_dict() for event in outcome.events],
+                "message": self._add_message(device, outcome, saved)}
+
+    def _first_poll(self, device: Device, save: bool = True):
+        """One poll, through the running poller when there is one.
+
+        `save=False` is the "test these credentials" case: it talks to the device
+        through exactly the same code, and writes nothing at all. Testing a device
+        must not put it in the inventory, and it must not put a sample in the history
+        of a device that is not there.
+        """
+        from .model import Reading
+        from .poller import PollOutcome, Poller, poll_device
+
+        poller = self.poller
+        if poller is None:
+            poller = Poller(self.store, self.config)
+        try:
+            if save:
+                return poller.poll(device, force=True)
+            reading = poll_device(device, self.config, client_factory=poller.client_factory,
+                                  prober=poller.prober, tcp_prober=poller.tcp_prober,
+                                  http_prober=poller.http_prober, clock=poller.clock)
+            return PollOutcome(device, reading)
+        except Exception as exc:                            # noqa: BLE001
+            # the reading is still worth returning: it carries the reason
+            return PollOutcome(device, Reading(device_id=device.key(), status="unknown"),
+                               error=str(exc))
+
+    def _add_message(self, device: Device, outcome, saved: bool) -> str:
+        reading = outcome.reading
+        where = ("saved" if saved else "not saved — this was only a test")
+        if outcome.error or reading.message:
+            reason = outcome.error or reading.message
+            return ("%s, but the device did not answer: %s<br>Check the %s, the port, "
+                    "and that the device allows this address to poll it."
+                    % (where, esc(reason), esc(device.credentials())))
+        bits = ["%s" % esc(reading.status)]
+        if reading.latency_ms is not None:
+            bits.append("%.0f ms" % reading.latency_ms)
+        if reading.metrics:
+            # canonical metrics first: "cpu 18 · temperature 42" says more than
+            # "fan 4200 · optical_min -6.50", which is what alphabetical order gives
+            order = {key: index for index, key in enumerate(mibs.CANONICAL)}
+            # `_min`/`_max`/`_avg` keys are the dashboard's own arithmetic, not
+            # something a device reported: they would crowd out the real numbers here
+            names = [key for key in reading.metrics
+                     if key in order and not key.endswith(("_min", "_max", "_avg"))]
+            names.sort(key=lambda key: order[key])
+            names += [key for key in sorted(reading.metrics)
+                      if key not in order and not key.endswith(("_min", "_max", "_avg"))]
+            bits.append(" · ".join("%s %s" % (esc(key), _round(reading.metrics[key]))
+                                   for key in names[:5]))
+        down = len([port for port in (reading.interfaces or [])
+                    if getattr(port, "oper", "") == "down" and getattr(port, "admin", "") == "up"])
+        if down:
+            bits.append("%d port(s) down" % down)
+        return "%s — %s" % (where, " · ".join(bits))
+
+    def remove_device(self, device_id: str) -> Dict[str, object]:
+        """Take a device out of the inventory, with its history."""
+        device = self.store.get_device(device_id)
+        if device is None:
+            return {"ok": False, "problems": ["no device called %s" % device_id]}
+        self.store.delete_device(device_id)
+        return {"ok": True, "problems": [], "removed": device.name}
+
     # ----------------------------------------------------------------------- api
     def api_summary(self) -> Dict[str, object]:
         fleet = self.store.fleet(hours=24)
@@ -634,7 +943,7 @@ class Dashboard:
         if not device:
             return None
         reading = self.store.last_sample(device_id)
-        return {"device": device.as_dict(),
+        return {"device": device.public_dict(),
                 "reading": reading.as_dict() if reading else None,
                 "interfaces": [row.as_dict() for row in self.store.interfaces(device_id)],
                 "uptime": self.store.uptime(device_id, hours=24)}
@@ -727,15 +1036,56 @@ def make_handler(dashboard: Dashboard, poll_hook: Optional[Callable[[str], objec
                     return self._html(body)
                 if path == "/wall":
                     return self._html(dashboard.wall())
+                if path == "/add":
+                    return self._html(dashboard.add_form(query))
                 if path == "/":
                     return self._html(dashboard.index(search, group, kind, status, hours))
                 return self._html("<h1>404</h1>", 404)
             except Exception as exc:                                # noqa: BLE001
                 self._html("<h1>500</h1><pre>%s</pre>" % esc(exc), 500)
 
+        def _body(self) -> Dict[str, object]:
+            """The JSON body, or the form fields — whichever the caller sent."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length else b""
+            kind = (self.headers.get("Content-Type") or "").lower()
+            if "json" in kind:
+                try:
+                    return json.loads(raw.decode("utf-8")) or {}
+                except ValueError:
+                    return {}
+            if raw:
+                parsed = urllib.parse.parse_qs(raw.decode("utf-8"))
+                return {key: value[0] for key, value in parsed.items()}
+            return {}
+
         def do_POST(self):
+            try:
+                return self._post()
+            except Exception as exc:                            # noqa: BLE001
+                try:
+                    self._json({"ok": False, "problems": ["the server failed: %s" % exc]}, 500)
+                except OSError:
+                    pass
+
+        def _post(self):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            query = self._query()
+            if path == "/api/devices":
+                payload = self._body()
+                test_only = str(payload.pop("test_only", query.get("test", ""))).lower() \
+                    in ("1", "true", "yes", "on")
+                force = str(payload.pop("force", query.get("force", ""))).lower() \
+                    in ("1", "true", "yes", "on")
+                result = dashboard.add_device(payload, test_only=test_only, force=force)
+                return self._json(result, 200 if result.get("ok") else 400)
+            if path.startswith("/api/remove/"):
+                result = dashboard.remove_device(path.rsplit("/", 1)[-1])
+                return self._json(result, 200 if result.get("ok") else 404)
             if path.startswith("/api/poll/"):
                 device_id = path.rsplit("/", 1)[-1]
                 if poll_hook is None:

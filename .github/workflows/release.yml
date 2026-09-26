@@ -140,7 +140,7 @@ jobs:
           merge-multiple: true
           path: out
       - name: Choose the release notes
-        # Written notes if the release has them (`docs/releases/v0.1.0.md`), otherwise
+        # Written notes if the release has them (`docs/releases/v0.1.1.md`), otherwise
         # whatever GitHub can generate from the commits. The REST API cannot update a
         # release by tag — only by id — so the notes have to be right the first time.
         shell: bash

@@ -29,17 +29,19 @@ from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDoubleSpinBox,
                              QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                             QMainWindow, QPushButton, QScrollArea, QSpinBox, QSplitter,
-                             QStatusBar, QTableWidget, QTableWidgetItem, QTabWidget,
-                             QToolBar, QVBoxLayout, QWidget)
+                             QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+                             QSplitter, QStatusBar, QTableWidget, QTableWidgetItem,
+                             QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 from .. import __version__, alerts as AL, mibs
+from ..model import slug
 from . import TABS
 from ..config import Config, db_path
 from ..model import (AlertTarget, Device, Event, Reading, human_bps, human_bytes,
                      human_seconds, parse_iso, now_utc)
 from ..poller import Poller
 from ..store import Store
+from .adddevice import AddDeviceDialog
 from .widgets import (BLUE, DEGRADED, DIM, DOWN, LINE, PANEL, TEXT, UNKNOWN, UP, Badge,
                       MetricRow, Sparkline, Tile, status_colour)
 
@@ -304,6 +306,15 @@ class DeviceTab(QWidget):
         self.poll_button = QPushButton("poll this device now")
         self.poll_button.clicked.connect(lambda: self.window.poll_now(self.device_key))
         head.addWidget(self.poll_button)
+        self.edit_button = QPushButton("edit")
+        self.edit_button.setToolTip("change the address, the credentials or the checks")
+        self.edit_button.clicked.connect(lambda: self.window.edit_device(self.device_key))
+        head.addWidget(self.edit_button)
+        self.remove_button = QPushButton("remove")
+        self.remove_button.setObjectName("danger")
+        self.remove_button.setToolTip("forget this device and its history")
+        self.remove_button.clicked.connect(lambda: self.window.remove_device(self.device_key))
+        head.addWidget(self.remove_button)
         layout.addLayout(head)
 
         self.facts = QLabel("")
@@ -928,6 +939,9 @@ class MainWindow(QMainWindow):
         self.wall_action = QAction("wall", self)
         self.wall_action.setCheckable(True)
         self.wall_action.toggled.connect(self._wall_toggled)
+        self.add_action = QAction("add device", self)
+        self.add_action.setShortcut(QKeySequence("Ctrl+N"))
+        self.add_action.triggered.connect(lambda: self.add_device())
         self.export_action = QAction("export inventory", self)
         self.export_action.triggered.connect(self.export_inventory)
         self.reload_action = QAction("reload", self)
@@ -938,6 +952,7 @@ class MainWindow(QMainWindow):
         for action in (self.poll_action, self.auto_action, self.reload_action):
             self.toolbar.addAction(action)
         self.toolbar.addSeparator()
+        self.toolbar.addAction(self.add_action)
         self.toolbar.addAction(self.wall_action)
         self.toolbar.addAction(self.export_action)
         self.toolbar.addAction(self.about_action)
@@ -1194,6 +1209,107 @@ class MainWindow(QMainWindow):
                                   self.tabs.currentIndex())
 
     # ------------------------------------------------------------------- actions
+    def add_device(self) -> None:
+        """The window nobody could find before: add a device, from the app.
+
+        It polls once before the device is trusted, and it does the poll on a worker
+        thread so a device that never answers costs four seconds and not a frozen window.
+        """
+        dialog = AddDeviceDialog(self.config, parent=self)
+        dialog.test_button.clicked.connect(lambda: self._try_device(dialog, save=False))
+        dialog.save_button.clicked.connect(lambda: self._try_device(dialog, save=True))
+        dialog.show()
+
+    def edit_device(self, key: Optional[str] = None) -> None:
+        device = self.store.get_device(key or getattr(self, "current_key", ""))
+        if device is None:
+            self.status.showMessage("no device selected", 6000)
+            return
+        dialog = AddDeviceDialog(self.config, device=device, parent=self)
+        dialog.test_button.clicked.connect(lambda: self._try_device(dialog, save=False))
+        dialog.save_button.clicked.connect(lambda: self._try_device(dialog, save=True))
+        dialog.show()
+
+    def remove_device(self, key: Optional[str] = None) -> None:
+        """Deleting a device deletes its history, so it asks twice."""
+        device = self.store.get_device(key or getattr(self, "current_key", ""))
+        if device is None:
+            self.status.showMessage("no device selected", 6000)
+            return
+        answer = QMessageBox.question(
+            self, "remove %s" % device.name,
+            "Forget %s and its stored history?\n\nThis cannot be undone." % device.name,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete_device(device.key())
+        if getattr(self, "current_key", "") == device.key():
+            self.current_key = ""
+        self.reload()
+        self.status.showMessage("%s is gone" % device.name, 8000)
+
+    def _try_device(self, dialog: "AddDeviceDialog", save: bool) -> None:
+        """Validate, then poll — saving first if this is the real thing."""
+        problems = dialog.problems()
+        if problems:
+            dialog.complain(problems)
+            return
+        device = dialog.proposed_device()
+        existing = self.store.get_device(device.key())
+        if save and existing and not dialog.force.isChecked():
+            dialog.complain(["%s is already in the inventory — tick “overwrite”, or "
+                             "use the device tab to edit it" % device.key()])
+            return
+        dialog.save_button.setEnabled(False)
+        dialog.test_button.setEnabled(False)
+        dialog.show_result(True, "talking to %s…" % (device.address or device.host))
+        if save:
+            self.store.save_device(device)
+        poller = self.poller
+        if poller is None:
+            poller = Poller(self.store, self.config)
+        worker = _OneDeviceWorker(poller, device, self.simulator, self)
+        if not save:
+            # a test must not leave a trace: poll without storing the reading
+            worker = _ProbeWorker(poller, device, self.simulator, self)
+        worker.done.connect(lambda outcomes, error: self._device_tried(
+            dialog, device, save, outcomes, error))
+        worker.start()
+        self._add_workers = getattr(self, "_add_workers", [])
+        self._add_workers.append(worker)
+
+    def _device_tried(self, dialog, device: Device, save: bool, outcomes, error: str) -> None:
+        dialog.save_button.setEnabled(True)
+        dialog.test_button.setEnabled(True)
+        outcome = outcomes[0] if outcomes else None
+        if error or outcome is None:
+            dialog.show_result(False, "the device did not answer: %s" % (error or "no answer"))
+            return
+        reading = outcome.reading
+        if save:
+            self.reload()
+            self.show_device(device.key(), quiet=True)
+        bits = ["%s" % reading.status]
+        if reading.latency_ms is not None:
+            bits.append("%.0f ms" % reading.latency_ms)
+        for key in ("cpu", "temperature", "memory"):
+            value = reading.metric(key)
+            if value is not None:
+                bits.append("%s %.4g" % (key, value))
+        if len(reading.interfaces):
+            bits.append("%d port(s)" % len(reading.interfaces))
+        if reading.facts.get("sys_descr"):
+            bits.append(str(reading.facts["sys_descr"]).split(",")[0])
+        dialog.show_result(bool(reading.status == "up"), " · ".join(bits))
+        if not save:
+            return
+        if outcome.error or reading.message:
+            dialog.show_result(False, "%s — %s" % (device.credentials(),
+                                                   outcome.error or reading.message))
+        self.status.showMessage("added %s" % device.name, 10000)
+        self.reload()
+
     def export_inventory(self) -> None:
         payload = {"exported": now_utc().isoformat(timespec="seconds"),
                    "version": __version__,
@@ -1225,6 +1341,35 @@ class _OneDeviceWorker(PollWorker):
                 self.simulator.advance(60.0, elapsed=time.time() - self.started_at)
             outcome = self.poller.poll(self.device, force=True)
             self.done.emit([outcome], outcome.error or "")
+        except Exception as exc:                         # noqa: BLE001
+            self.done.emit([], str(exc))
+
+
+class _ProbeWorker(PollWorker):
+    """`test these credentials` — one poll, nothing stored, nothing remembered.
+
+    The difference from `_OneDeviceWorker` is the whole point of the button: a device
+    that has not been saved yet must not appear in the history of the fleet, and a
+    reading for a device that was refused must not appear either.
+    """
+
+    def __init__(self, poller: Poller, device: Device, simulator=None, parent=None):
+        super().__init__(poller, simulator, parent)
+        self.device = device
+
+    def run(self) -> None:                               # noqa: D102
+        from ..poller import PollOutcome, poll_device
+
+        try:
+            if self.simulator is not None:
+                self.simulator.advance(60.0, elapsed=time.time() - self.started_at)
+            reading = poll_device(self.device, self.poller.config,
+                                  client_factory=self.poller.client_factory,
+                                  prober=self.poller.prober,
+                                  tcp_prober=self.poller.tcp_prober,
+                                  http_prober=self.poller.http_prober,
+                                  clock=self.poller.clock)
+            self.done.emit([PollOutcome(self.device, reading)], "")
         except Exception as exc:                         # noqa: BLE001
             self.done.emit([], str(exc))
 

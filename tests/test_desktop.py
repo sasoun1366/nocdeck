@@ -399,3 +399,77 @@ def test_a_bad_tab_name_is_said_out_loud_not_ignored(home, tmp_path, monkeypatch
     assert cli.main(["desktop", "--shot", str(tmp_path / "x.png"), "--tab", "nonsense"]) == 0
     assert "no tab called" in capsys.readouterr().err
     assert "--tab" not in calls[0]
+
+
+# ------------------------------------------------------------- adding a device (GUI)
+
+
+def test_the_add_dialog_asks_the_right_question_for_the_version():
+    """v1/v2c has a community string; v3 has a username and two passphrases. Showing
+    both at once is how a person ends up typing a passphrase into a community box."""
+    from nocdeck.desktop.adddevice import AddDeviceDialog
+
+    dialog = AddDeviceDialog(Config())
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    assert dialog.version.currentText() == "2c"
+    assert dialog.community.isEnabled() and not dialog.user.isEnabled()
+    dialog.version.setCurrentText("3")
+    assert not dialog.community.isEnabled() and dialog.user.isEnabled()
+    assert dialog.auth.currentText() == "sha256" and dialog.priv.currentText() == "aes"
+
+
+def test_the_dialog_says_what_is_missing_before_it_saves_anything():
+    from nocdeck.desktop.adddevice import AddDeviceDialog
+
+    dialog = AddDeviceDialog(Config())
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    assert any("address is required" in problem for problem in dialog.problems())
+    dialog.name.setText("core-sw-09")
+    dialog.host.setText("10.20.0.9")
+    assert dialog.problems() == []
+    dialog.version.setCurrentText("3")
+    assert any("username" in problem for problem in dialog.problems())
+    dialog.user.setText("nocmon")
+    dialog.auth_key.setText("a-passphrase")
+    dialog.priv_key.setText("p-passphrase")
+    assert dialog.problems() == []
+    assert dialog.proposed_device().credentials() == "v3 user nocmon (sha256/aes)"
+
+
+def test_editing_a_device_leaves_the_stored_passphrase_alone():
+    from nocdeck.desktop.adddevice import AddDeviceDialog
+
+    stored = Device(name="fw", host="10.0.0.9", version="3", user="nocmon", auth="sha256",
+                    auth_key="stored-auth", priv="aes", priv_key="stored-priv")
+    dialog = AddDeviceDialog(Config(), device=stored)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    assert dialog.name.text() == "fw" and dialog.version.currentText() == "3"
+    assert dialog.auth_key.text() == ""                 # never shown, on purpose
+    dialog.host.setText("10.0.0.10")
+    proposed = dialog.proposed_device()
+    assert proposed.host == "10.0.0.10"
+    assert (proposed.auth_key, proposed.priv_key) == ("stored-auth", "stored-priv")
+
+
+def test_the_dialog_renders_and_says_where_a_test_is_going():
+    """A frame of the real dialog, so a layout that collapses is caught here rather
+    than by the person who opened it."""
+    from nocdeck.desktop.adddevice import AddDeviceDialog
+
+    dialog = AddDeviceDialog(Config())
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    dialog.name.setText("acc-sw-floor3")
+    dialog.host.setText("10.20.1.13")
+    dialog.version.setCurrentText("3")
+    dialog.user.setText("nocmon")
+    dialog.auth_key.setText("a-passphrase")
+    dialog.priv_key.setText("p-passphrase")
+    dialog.resize(880, 560)
+    dialog.show()
+    frame = dialog.grab()
+    assert frame.width() >= 800 and frame.height() >= 400
+    assert not frame.toImage().isNull()
+    dialog.show_result(True, "talking to 10.20.1.13…")
+    assert "talking to" in dialog.result.text()
+    dialog.show_result(False, "the agent refused the request: no such user")
+    assert "no such user" in dialog.result.text()

@@ -8,6 +8,8 @@ alert, how a rate is computed — lives in the engine, once.
 ```text
             ┌──────────────┐
    SNMP ────┤  snmp        │  the wire: BER, PDUs, sessions, v1/v2c
+            │  snmpv3      │  USM: discovery, HMAC, timeliness, encrypted PDUs
+            │  crypto      │  AES and DES, written out in Python
    ICMP ────┤  probe       │  ping, TCP port, HTTP(S) + certificate expiry
    TCP ─────┤              │
             └──────┬───────┘
@@ -43,10 +45,30 @@ run for years. BER encoding for the eleven types an SNMP client actually needs i
 `tests/test_snmp.py` includes the negative-integer minimal-length case (`-128` is `80`,
 not `ff 80`) that real agents are unforgiving about.
 
-The price is paid at SNMP v3: the standard library has no AES or DES, so v3 cannot be
-implemented honestly here. Instead of half-supporting it, the tool detects the version
-and says "this needs `pysnmp`" — a wrong answer that looks right is worse than a missing
-feature.
+SNMPv3 was the second price, and it was paid rather than avoided. The standard library
+has HMAC and the hashes, but no AES and no DES — so `crypto.py` implements both, from
+FIPS-197 and the DES paper, in about 300 lines, and `snmpv3.py` implements the User-based
+Security Model on top: engine discovery, the password-to-key algorithm, the 150-second
+timeliness window, and the two privacy protocols.
+
+Three decisions in that file are worth naming, because they are the ones that decide
+whether a monitoring tool is trustworthy:
+
+* **The digest is verified against the bytes that arrived**, with the authentication
+  field zeroed in place, not against a message this code re-encoded. An agent is allowed
+  to write a BER length in a longer form than it needs; a client that re-encodes before
+  verifying rejects a perfectly honest device, and would have to be debugged on site.
+* **A REPORT may be unauthenticated, and is still read.** An agent that rejects your key
+  cannot sign with it, and "wrong password" is the single most useful thing it can say.
+  Everything that is not a REPORT, however, must be authenticated if the request was:
+  an unsigned answer to a signed question is refused.
+* **A device that rebooted is re-discovered, not reported as broken.** Its boots counter
+  moved, so its clock and its localized keys are new; the session notices, discovers
+  again, and asks once more.
+
+`nocdeck doctor` runs the published vectors as a self-test, so a wrong S-box or a
+mistaken megabyte of password repetition shows up in a terminal rather than as a mystery
+timeout against a customer's switch.
 
 ## The threshold rule
 

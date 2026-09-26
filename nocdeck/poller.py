@@ -265,7 +265,9 @@ def collect_snmp(device: Device, timeout: float = 2.0, retries: int = 1, bulk: i
     """
     started = time.time()
     agent = Agent(host=device.target(), port=device.port, community=device.community,
-                  version=device.version, user=device.user, auth=device.auth, priv=device.priv)
+                  version=device.version, user=device.user, auth=device.auth,
+                  auth_key=device.auth_key, priv=device.priv, priv_key=device.priv_key,
+                  context=device.context, keys_are_hex=device.keys_are_hex)
     reading = SnmpReading()
     own_client = client is None
     if own_client:

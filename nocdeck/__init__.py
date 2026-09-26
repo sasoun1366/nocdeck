@@ -4,5 +4,5 @@ Zero dependencies, pure standard library: SNMP v1/v2c written from scratch, ICMP
 TCP probes, SQLite history, a web dashboard and a desktop window over one core.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["__version__"]

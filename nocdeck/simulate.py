@@ -39,6 +39,15 @@ ESTATE: Sequence[Tuple[str, str, str, str, str]] = (
     ("printer-2f", "10.20.5.51", "printer", "printer", "campus"),
 )
 
+#: One device in the demo estate speaks SNMPv3, because a demo where nothing uses the
+#: feature is a demo of a different feature. The credentials are printed by `nocdeck
+#: demo` — they are imaginary, and they are the point: a username and two passphrases
+#: where the rest of the estate has a community string.
+DEMO_V3 = {
+    "fw-hq": {"user": "nocmon", "auth": "sha256", "auth_key": "demo-auth-passphrase",
+              "priv": "aes", "priv_key": "demo-priv-passphrase"},
+}
+
 PORTS_BY_KIND = {
     "switch": 24, "router": 8, "firewall": 8, "server": 4, "ap": 4, "ups": 1, "printer": 1,
 }
@@ -144,7 +153,8 @@ class SimNode:
         """The scalar OIDs a real agent would answer for this kind of box."""
         sys = mibs.SYS
         if oid == sys["descr"]:
-            return VENDOR_DESCR[self.device.vendor].format(name=self.device.name)
+            template = VENDOR_DESCR.get(self.device.vendor, "{name} (vendor not stated)")
+            return template.format(name=self.device.name)
         if oid == sys["object_id"]:
             return VENDOR_OID.get(self.device.vendor, "1.3.6.1.4.1.8072.3.2.10")
         if oid == sys["uptime"]:
@@ -416,15 +426,71 @@ class Simulator:
         self.outage = outage
         self.outage_done = False
         self.port_done = False
+        self.v3_agents: Dict[str, object] = {}       # one USM agent per v3 device
+        self.v3_wires: Dict[str, object] = {}
 
     # -------------------------------------------------------------- injection
-    def client_for(self, device: Device) -> SimClient:
+    def node_for(self, device: Device) -> SimNode:
+        """The imaginary box behind an address.
+
+        The address decides, not the name: if somebody adds `10.20.0.10` under a second
+        name, that is the same firewall, and the demo says so — the same way a real
+        estate answers two names for one management address.
+        """
         node = self.nodes.get(device.key())
-        if node is None:
-            node = SimNode(device=device, seed=abs(hash(device.key())) % 9999)
-            node.build()
-            self.nodes[device.key()] = node
+        if node is not None:
+            return node
+        for candidate in self.nodes.values():
+            if device.address and candidate.device.address == device.address:
+                return candidate
+            if device.host and candidate.device.host == device.host:
+                return candidate
+        node = SimNode(device=device, seed=abs(hash(device.key())) % 9999)
+        node.build()
+        self.nodes[device.key()] = node
+        return node
+
+    def client_for(self, device: Device):
+        """A client for this device: a v3 one for v3 gear, a stand-in for the rest.
+
+        A simulated v3 device is not answered by a shortcut. It gets a real
+        `snmp.Client` talking to a real USM session over a loopback socket.
+        """
+        node = self.node_for(device)
+        if (device.version or "") == "3" or (node.device.version or "") == "3":
+            return self.v3_client_for(device, node)
         return SimClient(node)
+
+    def v3_client_for(self, device: Device, node: Optional[SimNode] = None):
+        """The real client, over a socket that goes nowhere but here."""
+        from . import snmp
+        from .simv3 import LoopbackSocket, V3Agent, V3User
+
+        node = node or self.node_for(device)
+        # The *device's* credentials are what the agent knows, and the record is what the
+        # client sends. When they are the same record that is a formality; when a person
+        # has just typed a passphrase into the add form, that is the whole test — the
+        # demo refuses a wrong passphrase exactly the way a switch does, with a REPORT,
+        # rather than accepting anything typed at it.
+        known = node.device
+        user = V3User(name=known.user or device.user,
+                      auth_protocol=(known.auth or device.auth),
+                      auth_password=(known.auth_key or device.auth_key),
+                      priv_protocol=(known.priv or device.priv),
+                      priv_password=(known.priv_key or device.priv_key))
+        agent = V3Agent(node=node, users={user.name: user})
+        agent.engine_id = b"\x80\x00\x00\x02" + ("nocdeck-%s" % node.device.id)[:13] \
+            .encode("utf-8").ljust(13, b"\x00")
+        self.v3_agents[device.key()] = agent
+        wire = LoopbackSocket(agent)
+        client = snmp.Client(snmp.Agent(host=device.target(), port=device.port,
+                                        version="3", user=device.user, auth=device.auth,
+                                        auth_key=device.auth_key, priv=device.priv,
+                                        priv_key=device.priv_key, context=device.context,
+                                        keys_are_hex=device.keys_are_hex),
+                             timeout=2.0, retries=1, sock=wire)
+        self.v3_wires[device.key()] = wire
+        return client
 
     def prober(self, host: str, count: int = 3, timeout: float = 1.5, tcp_fallback=()):
         for node in self.nodes.values():
@@ -524,6 +590,14 @@ def build_world(store, config, size: Optional[int] = None) -> Dict[str, SimNode]
                         tcp_ports=[22, 161] if kind in ("switch", "router", "server") else [],
                         http_url="https://%s/" % address if kind == "server" else "",
                         tags=["demo"])
+        if name in DEMO_V3:
+            device.version = "3"
+            device.community = ""
+            device.user = DEMO_V3[name]["user"]
+            device.auth = DEMO_V3[name]["auth"]
+            device.auth_key = DEMO_V3[name]["auth_key"]
+            device.priv = DEMO_V3[name]["priv"]
+            device.priv_key = DEMO_V3[name]["priv_key"]
         device.address = address
         device.first_seen = iso()
         node = SimNode(device=device, seed=index * 31 + 7)

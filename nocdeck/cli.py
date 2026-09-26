@@ -213,10 +213,16 @@ def cmd_add(args) -> int:
         return out.fail("give a host: nocdeck add 10.0.0.5 --name core-sw")
     store = open_store(args)
     config = load_config(args)
+    v3 = args.version == "3"
     device = Device(
         name=args.name or args.host, host=args.host, kind=args.kind, group=args.group or "",
-        location=args.location or "", community=args.community or "public",
-        version=args.version, port=args.snmp_port, interval=args.interval,
+        location=args.location or "",
+        community="" if v3 else (args.community or "public"),
+        version=args.version, port=args.snmp_port,
+        interval=args.interval or config.interval,
+        user=args.user, auth=args.auth, auth_key=args.auth_key,
+        priv=args.priv, priv_key=args.priv_key, context=args.context,
+        keys_are_hex=bool(getattr(args, "keys_are_hex", False)),
         snmp=not args.no_snmp, ping=not args.no_ping, snmp_only=args.snmp_only,
         tcp_ports=[int(p) for p in (args.tcp or "").split(",") if p.strip().isdigit()],
         http_url=args.http or "", tags=[tag.strip() for tag in (args.tags or "").split(",")
@@ -224,12 +230,17 @@ def cmd_add(args) -> int:
         notes=args.notes or "")
     if args.name:
         device.id = slug(args.name)
+    problems = device.validate()
+    if problems:
+        for problem in problems:
+            out.warn(problem)
+        return out.fail("this device cannot be polled as described")
     if store.get_device(device.key()) and not args.force:
         return out.fail("%s is already in the inventory (--force to overwrite)"
                         % device.key())
     store.save_device(device)
     out.step("added", "%s → %s (%s, %s)" % (device.name, device.host, device.kind,
-                                            device.community))
+                                            device.credentials()))
     # first look, so the person sees something immediately
     poller = Poller(store, config)
     outcome = poller.poll(device, force=True)
@@ -298,6 +309,8 @@ def cmd_show(args) -> int:
     out.say("  address      %s" % (device.address or device.host))
     out.say("  kind         %s · %s" % (device.kind, device.vendor or "vendor unknown"))
     out.say("  group        %s" % (device.group or "—"))
+    out.say("  snmp         %s · port %d · every %ds"
+            % (device.credentials(), device.port, device.interval))
     if reading:
         out.say("  status       %s  (seen %s)" % (reading.status, reading.at))
         out.say("  uptime       %s" % (reading.uptime_text() or "—"))
@@ -335,7 +348,11 @@ def cmd_show(args) -> int:
         out.say("  recent events")
         for event in events:
             out.say("   %s  %-16s %s" % (event.at[5:16], event.kind, event.message[:110]))
-    out.data({"device": device.as_dict(), "reading": reading.as_dict() if reading else None,
+    # `--json` goes into tickets, chat messages and log files; the passphrases and the
+    # community string stay behind. `nocdeck export` is the way to keep a restorable
+    # copy, and it says out loud that the file it writes is a secret.
+    out.data({"device": device.public_dict(),
+              "reading": reading.as_dict() if reading else None,
               "interfaces": [row.as_dict() for row in interfaces],
               "events": [event.as_dict() for event in events]})
     return 0
@@ -457,7 +474,13 @@ def cmd_demo(args) -> int:
     poller = Poller(store, config, client_factory=simulator.client_for,
                     prober=simulator.prober, tcp_prober=simulator.tcp_prober,
                     http_prober=simulator.http_prober)
-    out.banner("demo — %d imaginary devices" % len(nodes))
+    v3_devices = [device for device in store.devices() if device.version == "3"]
+    out.banner("demo — %d imaginary devices%s"
+               % (len(nodes), ", %d of them speak SNMPv3"
+                  % len(v3_devices) if v3_devices else ""))
+    for device in v3_devices:
+        out.step("v3 demo device", "%s — %s with passphrases %r / %r"
+                 % (device.name, device.credentials(), device.auth_key, device.priv_key))
     out.step("building history", "a few passes so the graphs have a shape")
     started = time.time()
     for pass_number in range(args.warmup):
@@ -642,6 +665,8 @@ def cmd_alert(args) -> int:
 
 
 def cmd_doctor(args) -> int:
+    from . import snmpv3
+
     out = Out(args.quiet, args.json)
     store = open_store(args)
     config = load_config(args)
@@ -658,13 +683,23 @@ def cmd_doctor(args) -> int:
     if not latest and devices:
         problems.append("no device has ever been polled — run `nocdeck poll`")
     out.say("  polled          %d/%d device(s)" % (len(latest), len(devices)))
-    fresh = [device for device in devices if device.snmp]
-    if fresh and not any(device.community for device in fresh):
-        problems.append("devices have no SNMP community set")
+    fresh = [device for device in devices
+             if device.snmp and device.version != "3" and not device.community]
+    if fresh:
+        problems.append("%d v1/v2c device(s) have no community string" % len(fresh))
+    for device in devices:
+        for problem in device.validate():
+            problems.append("%s: %s" % (device.name, problem))
     v3 = [device for device in devices if device.version == "3"]
     if v3:
-        out.say("  snmpv3          %d device(s) — detected, not polled" % len(v3))
-    out.say("  snmp            " + ("v1 + v2c implemented; v3 reported only"))
+        out.say("  snmpv3          %d device(s): %s"
+                % (len(v3), ", ".join("%s (%s)" % (device.name, device.credentials())
+                                      for device in v3[:4])))
+    out.say("  snmp            v1 + v2c + v3 (USM: md5/sha/sha2, aes/des)")
+    for line in snmpv3.selftest():
+        out.say("  crypto          %s" % line)
+        if "WRONG" in line:
+            problems.append("the v3 crypto self-test failed: %s" % line)
     if not config.alert_targets:
         out.say("  alerts          none — the dashboard will know, nobody will be told")
     else:
@@ -731,7 +766,7 @@ def cmd_version(args) -> int:
         print("python  %s" % sys.version.split()[0])
         print("home    %s" % home())
         print("db      %s" % db_path())
-        print("desks   %d vendors · %d standard tables · SNMP v1/v2c" %
+        print("desks   %d vendors · %d standard tables · SNMP v1/v2c/v3" %
               (len({row.vendor for row in mibs.VENDOR_METRICS if row.vendor}),
                len(mibs.standard_table_roots())))
     return 0
@@ -778,9 +813,18 @@ def build_parser() -> argparse.ArgumentParser:
                             "printer", "storage", "camera"])
     p.add_argument("--group", default="")
     p.add_argument("--location", default="")
-    p.add_argument("--community", default="")
+    p.add_argument("--community", default="", help="v1/v2c community string")
     p.add_argument("--version", default="2c", choices=["1", "2c", "3"])
     p.add_argument("--snmp-port", type=int, default=161)
+    v3 = p.add_argument_group("SNMPv3")
+    v3.add_argument("--user", default="", help="v3 username (USM)")
+    v3.add_argument("--auth", default="", help="md5, sha, sha256, sha512…")
+    v3.add_argument("--auth-key", default="", help="the authentication passphrase")
+    v3.add_argument("--priv", default="", help="aes or des (needs --auth)")
+    v3.add_argument("--priv-key", default="", help="the privacy passphrase")
+    v3.add_argument("--context", default="", help="v3 context name; usually empty")
+    v3.add_argument("--keys-are-hex", action="store_true",
+                    help="--auth-key/--priv-key are already-localized keys in hex")
     p.add_argument("--no-snmp", action="store_true", help="ping it only")
     p.add_argument("--no-ping", action="store_true")
     p.add_argument("--snmp-only", action="store_true", help="do not ping it either")

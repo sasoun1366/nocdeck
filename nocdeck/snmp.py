@@ -47,6 +47,7 @@ GET_NEXT_REQUEST = 0xA1
 GET_RESPONSE = 0xA2
 SET_REQUEST = 0xA3
 GET_BULK_REQUEST = 0xA5
+REPORT = 0xA8                                   # SNMPv3: the agent talking about itself
 
 #: Which decoder to use for a value tag, and what to call the result.
 VALUE_KINDS = {
@@ -167,13 +168,22 @@ def encode_null() -> bytes:
 
 
 def encode_value(value, tag: Optional[int] = None) -> bytes:
-    """A Python value into the tag an SNMP SET/GET payload wants."""
+    """A Python value into the tag an SNMP SET/GET payload wants.
+
+    Integers are signed when the tag says INTEGER and unsigned when it says
+    Counter32/Gauge32/TimeTicks. That distinction is not academic: an optical receive
+    level is a negative number of decibel-milliwatts, and a device whose SFP reports
+    -6.50 dBm is a device that works. Encoding every integer as unsigned made such a
+    value impossible to write and turned a working optic into an exception.
+    """
     if value is None:
         return encode_null()
     if isinstance(value, bool):
-        return _unsigned(int(value), tag or INTEGER)
+        return encode_int(int(value))
     if isinstance(value, int):
-        return _unsigned(value, tag or COUNTER32)
+        if tag in (COUNTER32, GAUGE32, TIMETICKS) or (tag is None and value >= 0):
+            return _unsigned(value, tag or COUNTER32)
+        return encode_int(value)
     if isinstance(value, str):
         if tag == OBJECT_ID:
             return encode_oid(value)
@@ -302,19 +312,9 @@ class Message:
 
     # ------------------------------------------------------------------ encode
     def encode(self) -> bytes:
-        if self.pdu == GET_BULK_REQUEST:
-            head = encode_int(self.request_id) + encode_int(self.non_repeaters) \
-                + encode_int(self.max_repetitions)
-        else:
-            head = encode_int(self.request_id) + encode_int(self.error_status) \
-                + encode_int(self.error_index)
-        bindings = b"".join(_tlv(SEQUENCE, encode_oid(b.oid) + encode_null())
-                            for b in self.varbinds if b.value is None)
-        valued = b"".join(_tlv(SEQUENCE, encode_oid(b.oid) + encode_value(b.value, b.tag))
-                          for b in self.varbinds if b.value is not None)
-        body = head + _tlv(SEQUENCE, bindings + valued)
+        """A v1/v2c message: version, community, PDU."""
         return _tlv(SEQUENCE, encode_int(self.version) + encode_octets(self.community)
-                    + _tlv(self.pdu, body))
+                    + encode_pdu(self))
 
     # ------------------------------------------------------------------ decode
     @classmethod
@@ -334,28 +334,16 @@ class Message:
         message.community = community.decode("utf-8", "replace")
         tag, body = inner.tlv()
         message.pdu = tag
-        if tag == 0xA8:                               # SNMPv3 message: say so clearly
-            raise SnmpError("this is an SNMPv3 answer; only v1/v2c are implemented")
-        if tag not in (GET_REQUEST, GET_NEXT_REQUEST, GET_RESPONSE, SET_REQUEST,
-                       GET_BULK_REQUEST):
+        if tag == 0xA8:            # an SNMPv3 message cannot be read by v1/v2c code
+            raise SnmpError("this is an SNMPv3 message: it needs the USM layer "
+                            "(nocdeck.snmpv3), not the v1/v2c decoder")
+        if tag not in PDUS:
             raise SnmpError("unexpected PDU 0x%02x" % tag)
-        # Every PDU has the same shape: request id, two integers, then the bindings.
-        # For GETBULK the two integers are non-repeaters and max-repetitions, which is
-        # why a request can be decoded with the same code as an answer.
-        pdu = Reader(body)
-        _tag, request = pdu.tlv()
-        message.request_id = int.from_bytes(request, "big", signed=True)
-        _tag, first = pdu.tlv()
-        _tag, second = pdu.tlv()
-        if tag == GET_BULK_REQUEST:
-            message.non_repeaters = int.from_bytes(first, "big", signed=True)
-            message.max_repetitions = int.from_bytes(second, "big", signed=True)
-        else:
-            message.error_status = int.from_bytes(first, "big", signed=True)
-            message.error_index = int.from_bytes(second, "big", signed=True)
-        _tag, bindings = pdu.tlv()
-        message.varbinds = _decode_varbinds(bindings)
-        return message
+        return decode_pdu(tag, body, message)
+
+    def is_report(self) -> bool:
+        """SNMPv3 agents answer a bad message with a REPORT rather than silence."""
+        return self.pdu == REPORT
 
     def raise_for_status(self) -> None:
         if self.error_status:
@@ -363,6 +351,50 @@ class Message:
             raise SnmpError("agent refused: %s%s"
                             % (ERROR_STATUS.get(self.error_status,
                                                 "error %d" % self.error_status), where))
+
+
+#: Every PDU this tool speaks. REPORT is SNMPv3's way of answering a bad message.
+PDUS = (GET_REQUEST, GET_NEXT_REQUEST, GET_RESPONSE, SET_REQUEST, GET_BULK_REQUEST, REPORT)
+
+
+def encode_pdu(message: "Message") -> bytes:
+    """The PDU on its own — shared by the v1/v2c message and the v3 scoped PDU."""
+    if message.pdu == GET_BULK_REQUEST:
+        head = encode_int(message.request_id) + encode_int(message.non_repeaters) \
+            + encode_int(message.max_repetitions)
+    else:
+        head = encode_int(message.request_id) + encode_int(message.error_status) \
+            + encode_int(message.error_index)
+    bindings = b"".join(_tlv(SEQUENCE, encode_oid(b.oid) + encode_null())
+                        for b in message.varbinds if b.value is None)
+    valued = b"".join(_tlv(SEQUENCE, encode_oid(b.oid) + encode_value(b.value, b.tag))
+                      for b in message.varbinds if b.value is not None)
+    return _tlv(message.pdu, head + _tlv(SEQUENCE, bindings + valued))
+
+
+def decode_pdu(tag: int, body: bytes, message: Optional["Message"] = None) -> "Message":
+    """Fill a `Message` from a PDU body.
+
+    Every PDU has the same shape — request id, two integers, then the bindings — and for
+    GETBULK the two integers are non-repeaters and max-repetitions rather than status
+    and index. That is why one decoder serves requests and answers alike.
+    """
+    message = message or Message()
+    message.pdu = tag
+    pdu = Reader(body)
+    _tag, request = pdu.tlv()
+    message.request_id = int.from_bytes(request, "big", signed=True)
+    _tag, first = pdu.tlv()
+    _tag, second = pdu.tlv()
+    if tag == GET_BULK_REQUEST:
+        message.non_repeaters = int.from_bytes(first, "big", signed=True)
+        message.max_repetitions = int.from_bytes(second, "big", signed=True)
+    else:
+        message.error_status = int.from_bytes(first, "big", signed=True)
+        message.error_index = int.from_bytes(second, "big", signed=True)
+    _tag, bindings = pdu.tlv()
+    message.varbinds = _decode_varbinds(bindings)
+    return message
 
 
 def _decode_varbinds(payload: bytes) -> List[VarBind]:
@@ -389,14 +421,27 @@ class Agent:
     host: str
     port: int = 161
     community: str = "public"
-    version: str = "2c"                             # "1", "2c", or "3" (v3 is refused)
-    #: v3 fields, kept so a scan can say *why* a v3 device was skipped rather than
-    #: pretending it was silence.
+    version: str = "2c"                             # "1", "2c", or "3"
+    #: SNMPv3 (USM). `auth`/`priv` are protocol names — "sha", "md5", "sha256" and
+    #: "aes", "des" — and the keys are either the passwords themselves or the localized
+    #: keys in hex, in which case `keys_are_hex` says so.
     user: str = ""
     auth: str = ""
+    auth_key: str = ""
     priv: str = ""
+    priv_key: str = ""
+    context: str = ""
+    keys_are_hex: bool = False
+    #: A v3 conversation is stateful: the engine id, boots and time come from discovery.
+    engine_id: str = ""                             # hex, once discovered
+    engine_boots: int = 0
+    engine_time: int = 0
 
     def describe(self) -> str:
+        if self.version == "3":
+            return ("%s:%d v3 user %s (%s/%s)"
+                    % (self.host, self.port, self.user or "?",
+                       self.auth or "noAuth", self.priv or "noPriv"))
         return "%s:%d v%s community …%s" % (self.host, self.port, self.version,
                                             self.community[-2:] if self.community else "?")
 
@@ -438,8 +483,17 @@ class Client:
     # ------------------------------------------------------------------ request
     def request(self, message: Message) -> Message:
         if self.agent.version == "3":
-            raise SnmpError("SNMPv3 is not implemented (no AES in the standard library); "
-                            "use v2c, or ask this tool to probe and report the device")
+            from .snmpv3 import Session                      # circular by nature, tiny
+
+            if getattr(self, "_v3", None) is None:
+                self._v3 = Session(agent=self.agent, sock=self.sock, timeout=self.timeout,
+                                   retries=self.retries)
+            message.request_id = self._ids.randint(1, 0x7FFFFFF0)
+            answer = self._v3.exchange(message)
+            self.requests += 1
+            self.last_latency = self._v3.last_latency
+            answer.raise_for_status()
+            return answer
         message.version = 0 if self.agent.version == "1" else 1
         message.community = self.agent.community
         message.request_id = self._ids.randint(1, 0x7FFFFFF0)
@@ -557,10 +611,10 @@ class Client:
 
 def v3_note() -> str:
     """The honest sentence about SNMPv3, used by the CLI and the README."""
-    return ("SNMPv1 and v2c are fully implemented, in the standard library only. "
-            "SNMPv3 is detected and reported, but its authentication and privacy "
-            "need AES/DES that Python's standard library does not ship — see "
-            "`docs/snmp.md` for how to add it with `pysnmp` if your estate demands v3.")
+    return ("SNMPv1, v2c and v3 are implemented in the standard library alone. v3 "
+            "supports noAuthNoPriv, authNoPriv (MD5, SHA-1, SHA-224/256/384/512) and "
+            "authPriv with AES-128-CFB and CBC-DES, with engine discovery and the "
+            "timeliness check of RFC 3414.")
 
 
 def walk_many(agent: Agent, roots: Iterable[str], timeout: float = 2.0,

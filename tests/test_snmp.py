@@ -201,11 +201,14 @@ def test_an_answer_to_someone_elses_question_is_ignored():
         client.get(["1.3.6.1.2.1.1.1.0"])
 
 
-def test_the_client_refuses_to_pretend_about_v3():
-    client = snmp.Client(snmp.Agent("10.0.0.2", version="3"), sock=ScriptedSocket())
+def test_a_v3_device_that_stays_silent_is_reported_as_a_v3_discovery_failure():
+    """v3 is implemented now (see `tests/test_snmpv3.py`); a device that never answers
+    discovery is still a timeout, and the message says which protocol was talking."""
+    client = snmp.Client(snmp.Agent("10.0.0.2", version="3", user="nocmon", auth="sha",
+                                    auth_key="secret"), sock=ScriptedSocket(), retries=0)
     with pytest.raises(SnmpError) as caught:
         client.get(["1.3.6.1.2.1.1.1.0"])
-    assert "v3" in str(caught.value)
+    assert "discovery" in str(caught.value)
 
 
 def test_v1_uses_get_next_and_never_get_bulk():
